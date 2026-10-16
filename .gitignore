@@ -1,0 +1,14 @@
+.env
+browser_profile/
+shots/
+logs/
+autoboss.db
+__pycache__/
+*.pyc
+.venv/
+config.toml.bak
+_*_tmp.py
+
+# 个人资料：简历原件与求职者画像（含真实项目经历），不上传
+resume/*.pdf
+resume/kb.md

@@ -1,0 +1,7 @@
+# 唯一的外部依赖。其余全部使用 Python 标准库。
+# Python 3.11+ 即可（用到 tomllib）。
+#
+# 不用 Playwright / Selenium：它们连接 CDP 后会往页面注入自己的脚本，
+# 是明显的自动化指纹；而且 page 对象和 CDP session 可能落在不同 target 上。
+# 直接走原生 CDP websocket，附着目标明确，也不注入任何东西。
+websockets>=12.0
