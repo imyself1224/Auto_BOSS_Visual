@@ -39,6 +39,10 @@ def drive(outcomes: list[str]) -> tuple[int, int]:
         def __init__(self, *a, **kw):
             self.dry_run = kw.get("dry_run")
             self.stop_kind = ""
+            self.stats = {}
+
+        def filter_summary(self):
+            return ""
 
         def run(self):
             outcome = outcomes[len(runs)]
@@ -68,6 +72,12 @@ def test_captcha_not_restarted():
     check("验证码返回非 0", code, 1)
 
 
+def test_dry_pool_not_restarted():
+    code, n = drive(["dry", "quota"])
+    check("连续没有可投岗位：收工不重启", n, 1)
+    check("没岗位可投不算出错", code, 0)
+
+
 def test_gives_up_after_max_restarts():
     code, n = drive(["error"] * 10)
     check("最多重启 3 次 = 跑 4 轮", n, 4)
@@ -75,7 +85,7 @@ def test_gives_up_after_max_restarts():
 
 
 if __name__ == "__main__":
-    for fn in (test_restarts_until_quota, test_captcha_not_restarted,
+    for fn in (test_restarts_until_quota, test_captcha_not_restarted, test_dry_pool_not_restarted,
                test_gives_up_after_max_restarts):
         try:
             fn()

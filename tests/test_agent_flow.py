@@ -170,12 +170,6 @@ class FakeVision:
             }
         if prompt is prompts.POPUP_USER:
             return {"popup_visible": False, "risk_hint": None}
-        if prompt is prompts.CHAT_USER:
-            return {"chat_open": True, "input_box": {"x": 700, "y": 800},
-                    "send_button": {"x": 1100, "y": 870}, "confidence": 0.95,
-                    "risk_hint": None}
-        if prompt is prompts.CHAT_LIST_USER:
-            return {"chat_open": True, "conversations": [], "risk_hint": None}
         if prompt.startswith("筛选下拉菜单现在是展开的"):
             opened = (self.open_menu_script.pop(0) if self.open_menu_script
                       else self.open_menu_for)
@@ -357,33 +351,6 @@ def test_dry_run_never_clicks():
         check("演练计数 = 1", agent.stats["dry_run"], 1)
 
 
-def test_greeting_quality_prompt():
-    """招呼语 prompt 必须带上个人背景与岗位信息，且含字数约束。"""
-    silence()
-    with agent_env([]) as (agent, page, store, vision, client):
-        job = {"title": "推荐算法实习生", "company": "字节跳动",
-               "salary": "400-500元/天", "location": "北京·海淀区"}
-        msg = agent._compose_greeting(job)
-        check_true("生成了招呼语", bool(msg))
-        p = client.prompts[0]
-        check_true("prompt 含职位名", "推荐算法实习生" in p)
-        check_true("prompt 含公司名", "字节跳动" in p)
-        check_true("prompt 含个人成绩", "Recall@10" in p)
-        check_true("prompt 含字数上限", "90" in p)
-        check_true("prompt 含实习时间背景", "可实习" in p)
-
-
-def test_sanitize():
-    silence()
-    with agent_env([]) as (agent, *_):
-        check("去引号", agent._sanitize('"你好，我想聊聊"'), "你好，我想聊聊")
-        check("去中文引号", agent._sanitize("“你好”"), "你好")
-        check("去前缀", agent._sanitize("招呼语：你好"), "你好")
-        check("去代码围栏", agent._sanitize("```\n你好\n```"), "你好")
-        check("去围栏带语言标记", agent._sanitize("```text\n你好\n```"), "你好")
-        check("换行变空格", agent._sanitize("你好\n世界"), "你好 世界")
-
-
 def test_boss_filters_clicked():
     """筛选器必须真的被点开并选中。
 
@@ -424,6 +391,52 @@ def test_boss_filters_persist_in_url():
         check("第二次进入不再重复点筛选", len(page.clicks), clicks_before)
 
 
+def test_repeated_cards_do_not_count_as_dry():
+    """关键词之间重叠：翻到的全是本次已经滤过的老岗位 → 不累计「没岗位可投」。"""
+    silence()
+    bad = {**GOOD_JOB, "company": "X", "fit": "不可用"}
+    scene = {"page_state": "job_list", "jobs": [bad]}
+    with agent_env([scene] * 30) as (agent, page, store, vision, _):
+        agent.source_mode = "both"
+        agent.cfg._raw["search"]["queries"] = [f"词{i}" for i in range(6)]
+        agent.max_dry = 3
+        page.scroll = lambda dy, x=None, y=None, tries=4: 0
+        stopped = None
+        try:
+            agent._loop()
+        except StopRun as exc:
+            stopped = exc
+        check("同一张不可投的卡反复出现，不会触发收工", stopped, None)
+        check("只算了一次新卡", agent._dry_streak, 1)
+
+
+def test_job_type_in_url_skips_filter_clicks():
+    """地址里已带 jobType=1902（[search].job_type）→ 不点筛选栏，直接扫。"""
+    silence()
+    scene = {"page_state": "job_list", "jobs": []}
+    with agent_env([scene] * 2) as (agent, page, store, vision, _):
+        agent.boss_filters = [("求职类型", "实习")]
+        agent.cfg._raw["search"]["job_type"] = "1902"
+        agent._start_source("search", "大模型算法")
+        check_true("搜索地址带上了 jobType", "jobType=1902" in agent.feed_url)
+        agent._enter_source()
+        check("没有点筛选栏", len(page.clicks), 0)
+        check_true("视为筛选已生效", agent._filters_applied and agent._filters_persist)
+
+
+def test_recommend_last_puts_search_first():
+    silence()
+    with agent_env([]) as (agent, page, store, vision, _):
+        agent.source_mode = "both"
+        agent.cfg._raw["search"]["queries"] = ["大模型算法", "Agent"]
+        agent.cfg._raw["source"]["expect_tabs"] = ["算法工程师(北京)"]
+        agent.cfg._raw["source"]["recommend_last"] = True
+        check("先搜关键词，推荐流垫后", [k for k, _ in agent._sources()],
+              ["search", "search", "recommend", "expect"])
+        agent.cfg._raw["source"]["recommend_last"] = False
+        check("关掉则推荐流在前", [k for k, _ in agent._sources()][0], "recommend")
+
+
 GOOD_JOB = {
     "title": "推荐算法实习生", "company": "B", "salary": "400-500元/天",
     "location": "北京·海淀区", "district": "海淀区", "job_type": "实习", "fit": "最匹配",
@@ -435,12 +448,11 @@ def test_only_greet_never_chats():
     """★ 核心契约：只打招呼，不对话。★
 
     用户明确要求过 —— 点「立即沟通」就够了，不要进聊天页再替他发一条消息。
-    这个测试确保关掉 send_custom_message 之后，程序一次都不碰聊天页。
+    这个测试确保程序一次都不碰聊天页。
     """
     silence()
     scene = {"page_state": "job_list", "jobs": [GOOD_JOB]}
     with agent_env([scene] * 6, daily_cap=1, dry_run=False) as (agent, page, store, vision, _):
-        agent.send_custom = False
         try:
             agent._loop()
         except StopRun:
@@ -455,22 +467,21 @@ def test_only_greet_never_chats():
             "SELECT message FROM greeted WHERE status='sent'").fetchone()[0], "")
 
 
-def test_custom_message_when_enabled():
-    """反过来：显式打开开关时，才会进聊天页补发。"""
+def test_jump_to_chat_goes_straight_back():
+    """点完「立即沟通」BOSS 直接跳进聊天页 → 立刻回职位列表，不在聊天页点任何东西。"""
     silence()
     scene = {"page_state": "job_list", "jobs": [GOOD_JOB]}
-    with agent_env([scene] * 6, daily_cap=1, dry_run=False) as (agent, page, store, vision, _):
-        agent.send_custom = True
+    with agent_env([scene] * 4, daily_cap=1, dry_run=False) as (agent, page, store, vision, _):
+        agent.feed_url = "https://www.zhipin.com/web/geek/jobs?query=x&city=101010100"
+        page.url_on_click = "https://www.zhipin.com/web/geek/chat?id=1"
+        page.url_on_click_at = 1
         try:
             agent._loop()
         except StopRun:
             pass
-        check_true("打开了聊天页", any("chat" in t for t in vision.prompts_seen))
-        check_true("有发送校验", any("verify" in t for t in vision.prompts_seen))
-        check_true("点击多于 1 次", len(page.clicks) > 1)
-        row = agent.store.conn.execute(
-            "SELECT message FROM greeted WHERE status='sent'").fetchone()
-        check_true("话术已存档", bool(row and row[0]))
+        check("只点了「立即沟通」那一下", len(page.clicks), 1)
+        check_true("跳走后回到了职位列表", page.visited and page.visited[-1] == agent.feed_url)
+        check("算作已打招呼", agent.stats["sent"], 1)
 
 
 def test_same_job_title():
@@ -499,7 +510,6 @@ def test_greet_switches_detail_panel_first():
     job = {**GOOD_JOB, "card_click": {"x": 400, "y": 300}}
     scene = {"page_state": "job_list", "jobs": [job]}
     with agent_env([scene] * 6, daily_cap=1, dry_run=False) as (agent, page, store, vision, _):
-        agent.send_custom = False
         try:
             agent._loop()
         except StopRun:
@@ -514,7 +524,6 @@ def test_greet_skips_when_button_belongs_to_other_job():
     silence()
     scene = {"page_state": "job_list", "jobs": [GOOD_JOB]}
     with agent_env([scene] * 6, daily_cap=1, dry_run=False) as (agent, page, store, vision, _):
-        agent.send_custom = False
 
         # 让 locate 返回一个属于别的职位的按钮（重找卡片也拿不到东西）
         def fake_locate(page_, prompt, tag, **kw):
@@ -539,7 +548,6 @@ def test_button_not_found_skips_not_aborts():
     jobs = [{**GOOD_JOB, "company": f"C{i}"} for i in range(3)]
     scene = {"page_state": "job_list", "jobs": jobs}
     with agent_env([scene] * 8, daily_cap=3, dry_run=False) as (agent, page, store, vision, _):
-        agent.send_custom = False
         vision.locate = lambda *a, **k: None      # 永远定位不到按钮
         stopped = None
         try:
@@ -655,7 +663,6 @@ def test_whole_screen_greeted_before_moving_on():
             for i in range(3)]
     scene = {"page_state": "job_list", "jobs": jobs}
     with agent_env([scene] * 6, daily_cap=3, dry_run=False) as (agent, page, store, vision, _):
-        agent.send_custom = False
         before = len(page.visited)
         try:
             agent._loop()
@@ -673,7 +680,6 @@ def test_greet_retries_once_when_button_not_found():
     job = {**GOOD_JOB, "card_click": {"x": 400, "y": 300}}
     scene = {"page_state": "job_list", "jobs": [job]}
     with agent_env([scene] * 6, daily_cap=1, dry_run=False) as (agent, page, store, vision, _):
-        agent.send_custom = False
         seen = {"btn": 0, "refind": 0}
 
         def fake_locate(page_, prompt, tag, **kw):
@@ -793,7 +799,6 @@ def test_success_popup_closed_by_page_text():
     silence()
     scene = {"page_state": "job_list", "jobs": [GOOD_JOB]}
     with agent_env([scene] * 6, daily_cap=1, dry_run=False) as (agent, page, store, vision, _):
-        agent.send_custom = False
         stay = (980, 520, 90, 36)
         # 点「立即沟通」（第 1 次点击）之后弹窗出现；点中「留在此页」中心才消失
         def find(text, prefix=False):
@@ -876,6 +881,24 @@ def test_sources_switch_when_list_ends():
         check("没有空转", vision.list_calls, 6)
 
 
+def test_dry_streak_across_sources_stops_run():
+    """连续好几屏都没有可投的 → 收工（kind=dry），换关键词也不清零，不没头没脑地一直找。"""
+    silence()
+    scene = {"page_state": "job_list", "jobs": []}
+    with agent_env([scene] * 40) as (agent, page, store, vision, _):
+        agent.source_mode = "both"
+        agent.cfg._raw["search"]["queries"] = ["Agent实习", "推荐算法实习", "NLP实习"]
+        agent.max_dry = 5
+        page.scroll = lambda dy, x=None, y=None, tries=4: 0     # 一滚就到底：每个来源 2 屏
+        stopped = None
+        try:
+            agent._loop()
+        except StopRun as exc:
+            stopped = exc
+        check("连续 5 屏没有可投就收工", stopped.kind if stopped else None, "dry")
+        check("跨来源累计，第 5 屏就停", vision.list_calls, 5)
+
+
 def test_platform_quota_text_stops_run():
     """点完「立即沟通」页面上冒出额度用完的字样 → 立即停机，这一条不记成已发送。
 
@@ -885,7 +908,6 @@ def test_platform_quota_text_stops_run():
     silence()
     scene = {"page_state": "job_list", "jobs": [GOOD_JOB]}
     with agent_env([scene] * 6, daily_cap=200, dry_run=False) as (agent, page, store, vision, _):
-        agent.send_custom = False
         page.page_text = "岗位要求：并发已达上限"       # 点之前就有，不算
         orig_click = page.click
 
@@ -932,19 +954,21 @@ if __name__ == "__main__":
                test_daily_cap_stops, test_dry_run_never_clicks,
                test_card_title_paren_width_mismatch,
                test_platform_quota_text_stops_run,
-               test_sources_switch_when_list_ends,
+               test_sources_switch_when_list_ends, test_dry_streak_across_sources_stops_run,
+               test_job_type_in_url_skips_filter_clicks, test_recommend_last_puts_search_first,
+               test_repeated_cards_do_not_count_as_dry,
                test_card_clicked_by_title_and_company,
                test_filter_menu_closed_after_select, test_scroll_overlaps_screens,
                test_success_popup_closed_by_page_text,
                test_run_limit_independent_of_today_sent,
-               test_greeting_quality_prompt, test_sanitize,
+               
                test_boss_filters_clicked, test_boss_filters_persist_in_url,
                test_filter_misfire_is_detected_and_retried,
                test_filter_button_matched_by_text_not_by_point,
                test_filter_located_by_page_text_first,
                test_filter_gives_up_after_two_misfires,
                test_zoom_local_coords_are_converted,
-               test_only_greet_never_chats, test_custom_message_when_enabled,
+               test_only_greet_never_chats, test_jump_to_chat_goes_straight_back,
                test_same_job_title, test_greet_switches_detail_panel_first,
                test_greet_skips_when_button_belongs_to_other_job,
                test_button_not_found_skips_not_aborts,

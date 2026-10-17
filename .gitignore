@@ -10,5 +10,15 @@ config.toml.bak
 _*_tmp.py
 
 # 个人资料：简历原件与求职者画像（含真实项目经历），不上传
-resume/*.pdf
-resume/kb.md
+# 只上传示例画像 kb.example.md
+resume/*
+!resume/kb.example.md
+.stop_request
+.browser.lock
+
+# SnowLuma（QQ 托管）：第三方程序 + 它的配置/登录数据，不上传
+SnowLuma/
+
+# 本地开发笔记 / 临时文件
+进度.md
+anthropic_body.txt

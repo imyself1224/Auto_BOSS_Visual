@@ -129,8 +129,10 @@ def looks_like_internship(job: dict) -> bool:
         return True
     if jtype and ("全职" in jtype or "兼职" in jtype):
         return False
-    title = str(job.get("title") or "")
-    return any(marker in title for marker in _INTERN_MARKERS)
+    # 模型说「未知」/ 没给：看卡片上的证据。实测「全栈工程师 300-400元/天 · 4天/周 · 3个月」
+    # 这种标题没写实习、但标签和薪资单位一看就是实习的卡，以前全被当成全职滤掉了
+    # （一次运行里十几条）。
+    return _intern_evidence(job)
 
 
 @dataclass
@@ -144,6 +146,12 @@ class Rules:
     # （最匹配 / 次匹配 / 可转投 / 不可用）。
     # **表里没有的档位一律不打招呼** —— 所以「不可用」不写进来即可。
     fit_scores: dict[str, float] = field(default_factory=dict)
+    # 有门槛的档位：档位 → 日薪区间**最低值**下限。
+    # 达到了按本档计分；达不到就降到 fit_fallback 里写的档，没写降档 = 不打招呼。
+    # 比如测试：最低 ≥800 按「测试」档（同最匹配）投，800 以下降成「可转投」照投；
+    # 产品没写降档，800 以下就不投。
+    fit_min_low_wage: dict[str, float] = field(default_factory=dict)
+    fit_fallback: dict[str, str] = field(default_factory=dict)
     # 地点软排序：命中这些区就加分，**只影响先后，不排除**。
     # 做成软条件是因为很多岗位只写「北京」不写具体区，硬卡会漏掉一批好机会。
     prefer_districts: list[str] = field(default_factory=list)
@@ -183,6 +191,7 @@ def evaluate(job: dict, rules: Rules) -> Verdict:
         reasons.append("实习岗")
 
     # ---- 硬条件 2：薪资下限 ----
+    wage = None
     if hard_fail is None:
         wage = parse_daily_wage(salary_text, rules.work_days_per_month)
         if wage is None:
@@ -214,7 +223,16 @@ def evaluate(job: dict, rules: Rules) -> Verdict:
     suffix = f"：{reason}" if reason else ""
 
     if fit in rules.fit_scores:
-        score = float(rules.fit_scores[fit])
+        tier = fit
+        floor = rules.fit_min_low_wage.get(fit)
+        if floor is not None and (wage is None or wage.low < float(floor)):
+            got = f"最低 {wage.low:.0f}" if wage is not None else "读不出薪资"
+            gate = f"「{fit}」日薪最低 {got} < {float(floor):.0f}"
+            tier = rules.fit_fallback.get(fit, "")
+            if tier not in rules.fit_scores:
+                return Verdict(False, 0.0, [f"{gate}（{salary_text}）{suffix}"])
+            reasons.append(f"{gate}，按「{tier}」投")
+        score = float(rules.fit_scores[tier])
         reasons.append(f"{fit}{suffix}")
     else:
         return Verdict(False, 0.0, [

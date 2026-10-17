@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import json
 import random
 import time
 from pathlib import Path
@@ -22,6 +23,10 @@ from .deepseek import DeepSeekError
 from .store import job_key
 
 # 出现这些字样就说明该停机了 —— 要么配额用尽，要么触发了风控。
+# 筛选栏上的全部筛选器。选中后按钮文字会变成「公司行业(1)」这样带个数
+FILTER_NAMES = ("工作区域", "职位类型", "求职类型", "薪资待遇", "工作经验",
+                "学历要求", "公司行业", "公司规模", "融资阶段")
+
 QUOTA_MARKERS = ("主动沟通数已达上限", "今日开聊次数已用完", "沟通次数已用完",
                  "今日沟通次数", "次数已用完", "已达上限", "沟通上限", "额度已用完",
                  "明天再来")
@@ -38,8 +43,10 @@ class StopRun(Exception):
 
 class GreetAgent:
     def __init__(self, cfg, client, session, store, vision, limit: int | None = None,
-                 dry_run: bool | None = None, verbose: bool = True):
+                 dry_run: bool | None = None, verbose: bool = True, notifier=None):
         self.cfg = cfg
+        # QQ 推送（autoboss.qq.Notifier）。None = 不推送
+        self.notifier = notifier
         self.client = client
         self.session = session
         self.store = store
@@ -55,7 +62,6 @@ class GreetAgent:
         self.run_limit = limit
         self.min_interval = float(cfg.get("limits.min_interval_sec", 25))
         self.max_interval = float(cfg.get("limits.max_interval_sec", 60))
-        self.send_custom = bool(cfg.get("greeting.send_custom_message", True))
 
         # 职位来源："recommend" 走搜索框旁的推荐流；"search" 走关键词搜索
         self.source_mode = str(cfg.get("source.mode", "recommend")).lower()
@@ -84,6 +90,13 @@ class GreetAgent:
         # 连续多少屏挑不出合适的职位才收工。推荐流是无限滚动，
         # 往下翻一段通常还能再出来一批，所以别翻两下就放弃。
         self.max_stalls = int(cfg.get("limits.max_empty_scans", 6))
+        # 整个任务**连续**多少屏一个可投的都没有就收工（跨来源累计，换关键词不清零）。
+        # 这时候再翻下去多半是在乱找、白烧模型调用；不如停下，过段时间新岗位上来了再投。
+        self.max_dry = int(cfg.get("limits.max_dry_scans", 8))
+        self._dry_streak = 0
+        self._fresh_on_screen = 0
+        # 这次被过滤的岗位按原因归类计数，收工时一并汇报
+        self.filter_why: dict[str, int] = {}
 
         self.rules = filters.Rules(
             require_internship=bool(cfg.get("job_filter.require_internship", True)),
@@ -92,6 +105,8 @@ class GreetAgent:
             allow_unparsable=bool(cfg.get("job_filter.allow_unparsable", False)),
             require_city=str(cfg.get("job_filter.require_city", "北京")),
             fit_scores=dict(cfg.get("job_filter.fit_scores", {}) or {}),
+            fit_min_low_wage=dict(cfg.get("job_filter.fit_min_low_wage", {}) or {}),
+            fit_fallback=dict(cfg.get("job_filter.fit_fallback", {}) or {}),
             prefer_districts=list(cfg.get("job_filter.prefer_districts", []) or []),
             prefer_district_bonus=float(
                 cfg.get("job_filter.prefer_district_bonus", 1.0)),
@@ -104,6 +119,9 @@ class GreetAgent:
         self.kb = (self.kb_path.read_text(encoding="utf-8").strip()
                    if self.kb_path.is_file() else "")
 
+        # QQ 遥控「停止」时 bot 会建这个文件，扫描/投递间隙看到就收工
+        self.stop_flag = cfg.stop_flag
+
         self.stats = {"sent": 0, "dry_run": 0, "failed": 0, "already": 0, "filtered": 0}
         self.stop_kind = ""
 
@@ -111,9 +129,6 @@ class GreetAgent:
     def log(self, msg: str):
         if self.verbose:
             print(msg)
-
-    def _text_model(self) -> str:
-        return str(self.cfg.get("deepseek.text_model", "deepseek-flash"))
 
     # ------------------------------------------------------------------
     def run(self):
@@ -165,8 +180,8 @@ class GreetAgent:
         raise StopRun(
             f"找不到求职者画像：{self.kb_path}\n"
             "  它是判断岗位能不能投的唯一依据（路径见 config.toml 的 [resume]）。\n"
-            "  把你的简历交给模型，让它总结出「哪些岗位族可以投、优先级如何」，\n"
-            "  存成这个 markdown 文件，然后重跑。",
+            "  照 README「生成求职者画像」一节，把简历和提示词交给 DeepSeek 网页版生成，\n"
+            "  存成这个 markdown 文件（格式可参考 resume/kb.example.md），然后重跑。",
             "stop",
         )
 
@@ -220,14 +235,16 @@ class GreetAgent:
                    if str(q).strip()]
         if not queries and str(self.cfg.get("search.query", "")).strip():
             queries = [str(self.cfg.get("search.query")).strip()]
-        out: list[tuple[str, str]] = []
+        rec: list[tuple[str, str]] = []
         if mode in ("recommend", "both"):
-            out.append(("recommend", ""))
+            rec.append(("recommend", ""))
             # 推荐旁边的求职期望标签，如「算法工程师(北京)」—— 又是一个独立的岗位池
-            out.extend(("expect", str(t).strip())
+            rec.extend(("expect", str(t).strip())
                        for t in (self.cfg.get("source.expect_tabs", []) or []) if str(t).strip())
-        if mode in ("search", "both"):
-            out.extend(("search", q) for q in queries)
+        search = [("search", q) for q in queries] if mode in ("search", "both") else []
+        # 实测推荐流（加实习筛选后）前排多是 SLAM / 机器人这些不对口的，
+        # 关键词搜索一屏四条全对口 —— 所以默认先搜关键词，推荐流放最后补漏
+        out = search + rec if self.cfg.get("source.recommend_last", False) else rec + search
         return out or [("recommend", "")]
 
     def _start_source(self, kind: str, query: str):
@@ -242,6 +259,13 @@ class GreetAgent:
         self._filters_applied = False
         self._filters_persist = False
         self._filter_btn_box = None
+
+    def _tier_desc(self, tier: str) -> str:
+        floor = self.rules.fit_min_low_wage.get(tier)
+        if floor is None:
+            return tier
+        below = self.rules.fit_fallback.get(tier) or "不投"
+        return f"{tier}(最低≥{float(floor):.0f}，否则{below})"
 
     def _loop(self):
         budget = self.cap - self.store.greeted_today()
@@ -262,7 +286,7 @@ class GreetAgent:
             f"  硬性条件：{'实习' if self.rules.require_internship else '不限类型'}"
             f" · 日薪中位 ≥{self.rules.min_daily_wage:.0f}"
             f" · {self.rules.require_city}",
-            f"  投递档位：{'、'.join(self.rules.fit_scores) or '—'}"
+            f"  投递档位：{'、'.join(self._tier_desc(t) for t in self.rules.fit_scores) or '—'}"
             f"（未列出的档位 = 不发）",
             f"  优先区域：{'、'.join(self.rules.prefer_districts) or '—'}",
             f"  求职画像：{self.kb_path}",
@@ -290,8 +314,20 @@ class GreetAgent:
         """在当前来源里一屏屏往下扫，直到连续 max_stalls 屏没有可投的、或者翻到底。"""
         stalls = 0
         while stalls < self.max_stalls:
+            self._check_remote_stop()
             if self.stats["sent"] + self.stats["dry_run"] >= budget:
                 raise StopRun(f"本次任务配额已满（{budget} 条）", "quota")
+
+            stray = self._stray_filters()
+            if stray:
+                # 实测：关「已发送」弹窗时鼠标划过筛选栏，悬停弹出了「公司行业」菜单，
+                # 第二下点击落在「医疗健康」上 —— 之后整个列表只剩医疗公司。
+                # 页面上没有任何报错，不查的话会一直在错的池子里翻到收工。
+                self.log(f"  ! 筛选栏多出了没配置的筛选：{'、'.join(stray)}，重新进入来源")
+                self._enter_source()
+                if self._stray_filters():
+                    self.log("  ! 重进后还在，这个来源先放弃")
+                    return
 
             data = self._look(prompts.list_user(self.kb), tag)
             self._check_risk(data)
@@ -314,10 +350,12 @@ class GreetAgent:
 
             if targets:
                 stalls = 0
+                self._dry_streak = 0
                 # ★ 先把这一屏能投的全部投完，再往下翻 ★
                 # 每条 _greet_one 都会先点开目标卡片、再核对「立即沟通」按钮所属的
                 # 职位标题，点偏了会被拦下来，所以不用每条之间重新读屏。
                 for i, job in enumerate(targets):
+                    self._check_remote_stop()
                     if self.stats["sent"] + self.stats["dry_run"] >= budget:
                         raise StopRun(f"本次任务配额已满（{budget} 条）", "quota")
                     self._greet_one(job)
@@ -325,6 +363,12 @@ class GreetAgent:
                         humanize.human_delay(self.min_interval, self.max_interval)
             else:
                 stalls += 1
+                # 只有看到了新岗位、而且一个都不能投，才算「没岗位可投」；
+                # 整屏都是老面孔只说明这个关键词跟前面的重了，换下一个词就行
+                if not jobs or self._fresh_on_screen:
+                    self._dry_streak += 1
+                if self._dry_streak >= self.max_dry:
+                    raise StopRun(f"连续 {self._dry_streak} 屏没有可投的岗位，先停一停", "dry")
 
             self._advance_screen()
             # 连着两次滚不动 = 翻到页脚了。以前这里还会对着同一屏再看好几次，
@@ -657,6 +701,12 @@ class GreetAgent:
 
         # 筛选器：只要还没点过（或点了但没进 URL），每次进来都要确保它是生效的。
         # 进了 URL 的情况只需第一次点，之后地址本身就带着筛选条件。
+        if (self.boss_filters and self._job_type_in_url()
+                and not self._filters_applied):
+            # 地址里已经带着求职类型（[search].job_type），筛选栏不用再点
+            self._filters_applied = True
+            self._filters_persist = True
+            self.log("  · 地址已带求职类型参数，跳过点筛选栏")
         if self.boss_filters and not (self._filters_applied and self._filters_persist):
             self._apply_boss_filters()
             self._filters_applied = True
@@ -664,6 +714,44 @@ class GreetAgent:
         if self._scroll_pos:
             self._scroll_list(self._scroll_pos)
             humanize.pause(0.5, 1.0)
+
+    def _job_type_in_url(self) -> bool:
+        """当前地址带着配置的求职类型参数，且 boss_filters 只有「求职类型」这一项。"""
+        job_type = str(self.cfg.get("search.job_type", "") or "")
+        if not job_type or any(name != "求职类型" for name, _ in self.boss_filters):
+            return False
+        return f"jobType={job_type}" in (self.page.current_url() or "")
+
+    def _stray_filters(self) -> list[str]:
+        """筛选栏上被选中、但不在 boss_filters 配置里的筛选器（按页面文字查，不花模型调用）。"""
+        wanted = {name for name, _ in self.boss_filters}
+        names = [n for n in FILTER_NAMES if n not in wanted]
+        expr = ("(function(ns){var t=document.body?document.body.innerText:'';"
+                "return JSON.stringify(ns.filter(function(n){"
+                "return t.indexOf(n+'(')>=0||t.indexOf(n+' (')>=0;}));})(%s)"
+                % json.dumps(names, ensure_ascii=False))
+        try:
+            return list(json.loads(self.page.evaluate(expr) or "[]"))
+        except Exception:
+            return []
+
+    def _reload_detail_if_failed(self):
+        """右侧详情面板显示「数据加载失败」时点「点击重新加载」。
+
+        连着点卡片时 BOSS 偶尔会这样（实测懂车帝那条 Agent 岗就是），面板空着，
+        「立即沟通」当然找不到，一条最匹配的岗位就这么记成 failed 丢了。
+        """
+        for _ in range(2):
+            if not self.page.text_markers(["数据加载失败"]):
+                return
+            boxes = self.page.find_text_boxes("点击重新加载")
+            if not boxes:
+                return
+            self.log("    · 详情面板「数据加载失败」，点重新加载")
+            x, y, w, h = boxes[0]
+            vw, vh = self.page.viewport()
+            humanize.move_and_click(self.page, x + w / 2, y + h / 2, (vw, vh))
+            humanize.pause(2.0, 3.2)
 
     def _click_expect_tab(self, tab: str) -> bool:
         """按页面文字点「推荐」旁边的求职期望标签（如「算法工程师(北京)」）。"""
@@ -692,6 +780,9 @@ class GreetAgent:
         岗位会跟着这次刷新一起消失，白扔平台名额、也白扔已经花掉的模型调用。
         """
         candidates: list[tuple[float, dict, filters.Verdict]] = []
+        # 这一屏有几张**本次运行头一回见到**的卡。关键词之间重叠很多，
+        # 后面的词翻到的常是前面投过 / 滤过的 —— 那种屏不能算「市场上没岗位了」。
+        self._fresh_on_screen = 0
 
         for job in jobs:
             title = (job.get("title") or "").strip()
@@ -713,6 +804,8 @@ class GreetAgent:
                 self.log(f"  · 跳过（已沟通过）：{title} @ {company}")
                 continue
 
+            if job_key(title, company) not in self._filtered_seen:
+                self._fresh_on_screen += 1
             verdict = filters.evaluate(job, self.rules)
             if not verdict.ok:
                 self._mark_filtered(job, verdict)
@@ -729,6 +822,20 @@ class GreetAgent:
             self.log(f"    · {job.get('title')} @ {job.get('company')}  {verdict}")
         return [job for _, job, _ in candidates]
 
+    @staticmethod
+    def _why_category(reason: str) -> str:
+        for key, label in (("不是实习", "不是实习"), ("日薪中位", "日薪不够"),
+                           ("日薪最低", "产品/测试薪资不够"), ("没有可投的档位", "方向不对口"),
+                           ("地点", "不在北京"), ("无法解析", "薪资读不出")):
+            if key in reason:
+                return label
+        return "其他"
+
+    def filter_summary(self) -> str:
+        """「方向不对口 12 · 日薪不够 8 · …」，按数量从多到少。"""
+        items = sorted(self.filter_why.items(), key=lambda kv: -kv[1])
+        return " · ".join(f"{k} {v}" for k, v in items)
+
     def _mark_filtered(self, job: dict, verdict: filters.Verdict):
         """记下被过滤的职位。同一职位在本次运行里只提示一次，免得刷屏。"""
         key = job_key(job.get("title", ""), job.get("company", ""))
@@ -737,6 +844,8 @@ class GreetAgent:
         self._filtered_seen.add(key)
         self.stats["filtered"] += 1
         reason = verdict.reasons[0] if verdict.reasons else "不符合条件"
+        why = self._why_category(reason)
+        self.filter_why[why] = self.filter_why.get(why, 0) + 1
         self.log(f"  ✗ 过滤：{job.get('title')} @ {job.get('company')} —— {reason}")
         self.store.record(job.get("title", ""), job.get("company", ""),
                           job.get("salary", ""), "", "filtered", reason[:200])
@@ -749,100 +858,41 @@ class GreetAgent:
         self._attempted.add(job_key(title, company))
         self.log(f"\n  ▸ {title}  @ {company}  {salary}")
 
-        # 只有在需要补发定制话术时才去调文本模型。
-        # 关掉之后整个流程不碰聊天页 —— 不生成、不输入、不校验，
-        # 既省调用，也少一次"替用户多说话"的机会。
-        message = ""
-        if self.send_custom:
-            composed = self._compose_greeting(job)
-            if composed is None:
-                self.stats["failed"] += 1
-                self.store.record(title, company, salary, "", "failed", "招呼语生成失败")
-                return
-            message = composed
-
         # 演练模式到此为止。绝不点「立即沟通」——
         # 那一下本身就会消耗配额并真实触达 HR，演练不该产生任何外部影响。
         if self.dry_run:
             self.stats["dry_run"] += 1
-            note = "演练模式，未发送" if not message else f"演练模式，未发送｜拟发：{message}"
-            self.store.record(title, company, salary, message, "dry_run", note)
+            self.store.record(title, company, salary, "", "dry_run", "演练模式，未发送")
             return
 
+        # 这个 agent 只做一件事：点「立即沟通」。平台会自动发出默认招呼语并附上在线简历，
+        # 后面的对话由用户自己接管 —— 程序不进聊天页、不打字、不补发任何话。
         try:
-            # 定位不到按钮只是这一个职位的事，跳过继续，不要终止整轮 ——
-            # 之前这里抛 StopRun，导致一个职位识别失败就整个程序收工。
+            # 定位不到按钮只是这一个职位的事，跳过继续，不要终止整轮
             if not self._click_greet(job):
                 self.stats["failed"] += 1
-                self.store.record(title, company, salary, message, "failed",
+                self.store.record(title, company, salary, "", "failed",
                                   "未能确认「立即沟通」按钮（找不到，或按钮不属于该职位）")
                 self.log("    ✗ 没能确认沟通按钮，跳过这个职位")
                 return
 
             self._handle_popup()
-
-            # 补发定制话术（默认关闭）。开启时会进聊天页再发一条。
-            if self.send_custom and not self._send_custom(message, company):
-                self.stats["failed"] += 1
-                self.store.record(title, company, salary, message, "failed",
-                                  "自定义话术未确认发出")
-                return
+            self._back_to_list_if_left()
 
             self.stats["sent"] += 1
-            self.store.record(title, company, salary, message, "sent")
+            self.store.record(title, company, salary, "", "sent")
             total = self.store.greeted_today()
             self.log(f"    ✓ 已打招呼（今日累计 {total}/{self.cap}）")
+            if self.notifier is not None:
+                self.notifier.job_sent(title, company, salary, total, self.cap)
 
         except StopRun:
             raise
         except Exception as exc:  # noqa: BLE001
             self.stats["failed"] += 1
-            self.store.record(title, company, salary, message, "failed", str(exc)[:200])
+            self.store.record(title, company, salary, "", "failed", str(exc)[:200])
             self.log(f"    ✗ 失败：{exc}")
 
-    # ------------------------------------------------------------------
-    def _compose_greeting(self, job: dict) -> str | None:
-        """用文本模型生成招呼语。"""
-        profile = self.cfg.section("profile")
-        prompt = prompts.greeting(
-            profile, job,
-            str(self.cfg.get("greeting.style", "简洁专业")),
-            int(self.cfg.get("greeting.max_chars", 90)),
-        )
-        try:
-            text = self.client.chat(
-                prompt,
-                model=self._text_model(),
-                max_tokens=400,
-                temperature=1.3,   # 调高一点，避免每个职位都是同一个句式
-                thinking=bool(self.cfg.get("deepseek.thinking", False)),
-            )
-        except DeepSeekError as exc:
-            self.log(f"    ! 生成失败：{exc}")
-            return None
-
-        return self._sanitize(text)
-
-    @staticmethod
-    def _sanitize(text: str) -> str:
-        """清掉模型偶尔带出来的引号、前缀和换行。"""
-        t = (text or "").strip()
-        # 代码围栏：开头和结尾都要去，只去掉一半会把 ``` 留在消息里发出去
-        if t.startswith("```"):
-            t = t.split("\n", 1)[-1].strip()
-        if t.endswith("```"):
-            t = t[:-3].strip()
-        # 去掉整句包裹的引号
-        if len(t) >= 2 and t[0] in "\"'“「" and t[-1] in "\"'”」":
-            t = t[1:-1].strip()
-        # 去掉 "招呼语：" 这类前缀
-        for prefix in ("招呼语：", "招呼语:", "消息：", "消息:", "回复：", "回复:"):
-            if t.startswith(prefix):
-                t = t[len(prefix):].strip()
-        t = t.replace("\n", " ").strip()
-        return t
-
-    # ------------------------------------------------------------------
     @staticmethod
     def _normalize_title(text: str) -> str:
         t = "".join((text or "").split())
@@ -983,12 +1033,13 @@ class GreetAgent:
 
         # 上一个职位的「已向BOSS发送消息」弹窗若还盖着，这一个的按钮就看不见。
         # 按文字查一下，不花模型调用。
-        if not self.send_custom and self._dom_stay_on_page() == "closed":
+        if self._dom_stay_on_page() == "closed":
             self.log("    · 清掉了残留的发送成功弹窗")
 
         for attempt in range(2):
             # 1) 先把详情面板切到目标职位（第二次尝试会按职位名重找卡片）
             self._open_job_detail(job, retry=bool(attempt))
+            self._reload_detail_if_failed()
 
             # 2) 定位沟通按钮（提示词里只认「立即沟通」这一个文案）
             found = self.vision.locate(self.page, prompts.GREET_BUTTON_USER, "greet_btn")
@@ -1027,23 +1078,22 @@ class GreetAgent:
             标题「已向BOSS发送消息」
             按钮「留在此页」  「继续沟通」
         两个按钮都能让弹窗消失，但**「继续沟通」会把你带进聊天页**。
-        本程序默认只打招呼、不对话，所以必须点「留在此页」。
+        本程序只打招呼、不对话，所以必须点「留在此页」。
 
         之前用关键词匹配（"继续"、"沟通"）挑按钮，恰好选中了后者 ——
         于是每打完一次招呼就闯进聊天页，这正是要避免的行为。
-        现在改成让模型直接标注每个按钮会不会离开列表页，按模式来选。
+        现在让模型标注每个按钮会不会离开列表页，会离开的一律不点。
 
-        只打招呼时先按页面文字点「留在此页」并核对弹窗真的关了：
+        先按页面文字点「留在此页」并核对弹窗真的关了：
         实测模型报的按钮坐标偏上（报 y=559，按钮实际在 562–600），
         点空了弹窗还盖着，后面每个职位都找不到「立即沟通」。
         """
-        if not self.send_custom:
-            state = self._dom_stay_on_page()
-            if state == "closed":
-                self.log("    · 弹窗：点「留在此页」，已关闭")
-                return
-            if state == "stuck":
-                self.log("    ! 弹窗点了两次 + Esc 还在，交给截图识别再试")
+        state = self._dom_stay_on_page()
+        if state == "closed":
+            self.log("    · 弹窗：点「留在此页」，已关闭")
+            return
+        if state == "stuck":
+            self.log("    ! 弹窗点了两次 + Esc 还在，交给截图识别再试")
 
         data = self._look(prompts.POPUP_USER, "popup")
         self._check_risk(data)
@@ -1051,14 +1101,11 @@ class GreetAgent:
         if not data.get("popup_visible"):
             return
 
-        # 只打招呼 → 优先"留在本页"；要补发话术 → 优先"进聊天页"
-        pref, alt = ("chat_click", "stay_click") if self.send_custom \
-            else ("stay_click", "chat_click")
-        target = data.get(pref) or data.get(alt)
+        # 只点"留在本页"，**绝不**退而求其次去点"继续沟通"（那会进聊天页）
+        target = data.get("stay_click")
 
         if isinstance(target, dict) and target.get("x") is not None:
-            self.log(f"    · 弹窗：{data.get('popup_title') or '提示'}"
-                     f" → 点{'留在列表页' if pref == 'stay_click' else '进聊天页'}")
+            self.log(f"    · 弹窗：{data.get('popup_title') or '提示'} → 点留在列表页")
             self._click_norm(float(target["x"]), float(target["y"]))
             humanize.pause(1.2, 2.2)
             self.page = self.session.sync_page(self.page)
@@ -1070,16 +1117,21 @@ class GreetAgent:
             self.log("    · 有弹窗但没识别到按钮，跳过")
             return
 
-        want_leave = self.send_custom
-        pick = next((b for b in buttons if b.get("leaves_page") == want_leave), None)
+        # 会离开列表页的按钮一个都不碰；没有安全的按钮就按 Esc 关掉
+        buttons = [b for b in buttons if not b.get("leaves_page")
+                   and "沟通" not in (b.get("text") or "")]
+        if not buttons:
+            self.log("    · 弹窗里没有「留在此页」类按钮，按 Esc 关闭")
+            self.page.press_key("Escape")
+            humanize.pause(0.6, 1.0)
+            return
+        pick = None
         if pick is None:
-            pick = next((b for b in buttons if b.get("primary")), None)
-        if pick is None and not want_leave:
             stay_words = ("留在此页", "留在本页", "关闭", "知道了", "完成", "取消", "好的")
             pick = next((b for b in buttons
                          if any(w in (b.get("text") or "") for w in stay_words)), None)
         if pick is None:
-            pick = buttons[0]
+            pick = next((b for b in buttons if b.get("primary")), None) or buttons[0]
 
         c = pick.get("click") or {}
         if c.get("x") is None:
@@ -1090,6 +1142,17 @@ class GreetAgent:
         self._click_norm(float(c["x"]), float(c["y"]))
         humanize.pause(1.2, 2.2)
         self.page = self.session.sync_page(self.page)
+
+    def _back_to_list_if_left(self):
+        """点完「立即沟通」后 BOSS 有时**不弹窗、直接跳进聊天页**（实测 14:29 那次）。
+
+        以前没查这一点，程序就在聊天页上接着「找卡片、点卡片」，点到的其实是
+        会话列表 —— 看起来像 AI 在乱点消息。只打招呼的话，跳走了就直接回列表页。
+        """
+        self.page = self.session.sync_page(self.page)
+        if "/web/geek/chat" in (self.page.current_url() or ""):
+            self.log("    · 平台直接跳进了聊天页，不停留，回职位列表")
+            self._enter_source()
 
     _STAY_TEXTS = ("留在此页", "留在本页")
 
@@ -1110,6 +1173,11 @@ class GreetAgent:
             humanize.move_and_click(self.page, x + w / 2, y + h / 2, (vw, vh))
             humanize.pause(1.0, 1.8)
             found = boxes()
+            if found:
+                # 弹窗有淡出动画，刚点完可能还查得到。多等一下再确认，
+                # 免得第二下点空 —— 点空的那一下曾经落在筛选栏的下拉菜单上。
+                humanize.pause(1.0, 1.5)
+                found = boxes()
             if not found:
                 self.page = self.session.sync_page(self.page)
                 return "closed"
@@ -1118,95 +1186,12 @@ class GreetAgent:
         return "stuck" if boxes() else "closed"
 
     # ------------------------------------------------------------------
-    def _send_custom(self, message: str, company: str) -> bool:
-        """在聊天页把 AI 生成的定制话术补发出去。
-
-        必须补发的原因：平台强制先发它自己的默认招呼语，且**不允许**把自定义内容
-        设为默认招呼语。所以想在第一条消息里体现个性化，只能在系统招呼语之后追加。
-        """
-        data = self._look(prompts.CHAT_USER, "chat")
-        self._check_risk(data)
-
-        if not data.get("chat_open"):
-            self.log("    · 当前不在聊天页，去会话列表找…")
-            if not self._open_recent_conversation():
-                return False
-            data = self._look(prompts.CHAT_USER, "chat2")
-            self._check_risk(data)
-            if not data.get("chat_open"):
-                return False
-
-        # 输入框很小、位置又靠屏幕底部，点空的代价高（可能误点到别处）。
-        # 所以 CHAT_USER 给的坐标信心不足时，单独定位一次 ——
-        # Vision.locate 内部会在信心低时自动做局部放大复核，不用再手动加一轮。
-        box = data.get("input_box") or {}
-        if box.get("x") is None or float(data.get("confidence") or 0) < 0.7:
-            found = self.vision.locate(
-                self.page,
-                prompts.find_target("聊天窗口底部那个可以打字的消息输入框",
-                                    "注意不要选成页面顶部的搜索框。"),
-                "chat_input",
-            )
-            if found is None:
-                return False
-            box = {"x": found["x"], "y": found["y"]}
-
-        vw, vh = self.page.viewport()
-        cx, cy = overlay.norm_to_css(float(box["x"]), float(box["y"]), (vw, vh))
-        humanize.move_and_click(self.page, cx, cy, (vw, vh))
-        humanize.pause(0.5, 1.1)
-
-        self.page.type_text(message)
-        humanize.pause(0.7, 1.6)
-
-        send = data.get("send_button") or {}
-        if send.get("x") is not None:
-            sx, sy = overlay.norm_to_css(float(send["x"]), float(send["y"]), (vw, vh))
-            humanize.move_and_click(self.page, sx, sy, (vw, vh))
-        else:
-            self.page.press_key("Enter")
-        humanize.pause(1.5, 2.6)
-
-        # 核对是否真的发出去了 —— 不核对就可能在"以为发了"的状态下白白消耗配额
-        try:
-            check = self._look(prompts.verify_message(message), "verify")
-        except DeepSeekError as exc:
-            self.log(f"    ! 发送校验失败（{exc}），按未确认处理")
-            return False
-
-        if check.get("sent"):
-            return True
-
-        note = check.get("note") or "未在对话中找到该消息"
-        self.log(f"    ! 未确认发出：{note}（输入框为空={check.get('input_box_empty')}）")
-        return False
-
-    def _open_recent_conversation(self) -> bool:
-        """去聊天页打开最上面的那条会话。"""
-        self.page.navigate("https://www.zhipin.com/web/geek/chat",
-                           settle=random.uniform(3.0, 4.0))
-        self.page = self.session.sync_page(self.page)
-
-        data = self._look(prompts.CHAT_LIST_USER, "chatlist")
-        self._check_risk(data)
-        convs = data.get("conversations") or []
-        if not convs:
-            self.log("    · 会话列表是空的")
-            return False
-
-        c = convs[0].get("click") or {}
-        if c.get("x") is None:
-            return False
-
-        vw, vh = self.page.viewport()
-        cx, cy = overlay.norm_to_css(float(c["x"]), float(c["y"]), (vw, vh))
-        humanize.move_and_click(self.page, cx, cy, (vw, vh))
-        humanize.pause(1.5, 2.5)
-        return True
-
-    # ------------------------------------------------------------------
     def _look(self, prompt: str, tag: str) -> dict:
         return self.vision.look(self.page, prompt, tag=tag)
+
+    def _check_remote_stop(self):
+        if self.stop_flag.exists():
+            raise StopRun("收到 QQ 停止指令", "stop")
 
     def _check_risk(self, data: dict):
         """任何一次视觉返回都过一遍风控关键词检查。"""

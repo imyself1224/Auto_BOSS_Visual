@@ -23,11 +23,6 @@ _DEFAULTS: dict[str, dict[str, object]] = {
         "timeout_sec": 120,
         "thinking": False,
     },
-    "profile": {
-        "name": "", "years": 0, "target_role": "", "city": "",
-        "skills": [], "highlights": [], "extra": "",
-    },
-    "greeting": {"style": "简洁专业", "max_chars": 90, "send_custom_message": True},
     "search": {"query": "", "city": "100010000", "pages": 1},
     "source": {"mode": "recommend"},
     "resume": {"kb_path": "resume/kb.md"},
@@ -37,9 +32,12 @@ _DEFAULTS: dict[str, dict[str, object]] = {
         "work_days_per_month": 21.75,
         "allow_unparsable": False,
         "require_city": "北京",
-        # 档位权重：模型按知识库把岗位判成这四档，这里决定每档的排序分。
+        # 档位权重：模型按知识库把岗位判成这几档，这里决定每档的排序分。
         # 表里没有的档位（「不可用」）= 不打招呼。
         "fit_scores": {"最匹配": 3.0, "次匹配": 2.0, "可转投": 1.0},
+        # 有门槛的档位：日薪区间最低值达不到就不打招呼
+        "fit_min_low_wage": {},
+        "fit_fallback": {},
         "prefer_districts": [],
         "prefer_district_bonus": 1.0,
         "boss_filters": [["求职类型", "实习"]],
@@ -50,9 +48,15 @@ _DEFAULTS: dict[str, dict[str, object]] = {
     },
     "limits": {
         "daily_cap": 10, "min_interval_sec": 25, "max_interval_sec": 60,
-        "max_empty_scans": 6, "active_hours": [9, 21],
+        "max_empty_scans": 6, "max_dry_scans": 8, "active_hours": [9, 21],
     },
     "safety": {"dry_run": True, "stop_on_captcha": True},
+    "qq": {
+        "enabled": False, "ws_url": "ws://127.0.0.1:3001",
+        "access_token_env": "ONEBOT_TOKEN", "owner_qq": 0, "owner_qq_env": "", "notify_each": True,
+        "auto_launch": True, "snowluma_dir": "SnowLuma", "snowluma_webui_port": 5099,
+        "qq_path": r"C:\Program Files\Tencent\QQNT\QQ.exe",
+    },
 }
 
 
@@ -125,13 +129,27 @@ class Config:
     def db_path(self) -> Path:
         return PROJECT_ROOT / "autoboss.db"
 
+    @property
+    def stop_flag(self) -> Path:
+        """QQ 遥控「停止」时创建；投递进程看到它就收工。"""
+        return PROJECT_ROOT / ".stop_request"
+
+    @property
+    def lock_path(self) -> Path:
+        """浏览器独占锁（见 autoboss/lock.py）。"""
+        return PROJECT_ROOT / ".browser.lock"
+
     def search_url(self, page: int = 1, query: str | None = None) -> str:
         from urllib.parse import quote
         q = quote(str(self.get("search.query", "") if query is None else query))
         # 用 /web/geek/jobs（复数）：实测 /job 会被 302 到 /jobs，直接写复数省一次跳转
+        # 求职类型直接写进地址（实习 = jobType=1902，实测点筛选器后地址里就是它）。
+        # 这样每个来源一打开就是实习池，不用再去点筛选栏 —— 少点几下，也少几次模型调用。
+        job_type = str(self.get("search.job_type", "") or "")
         return (
             "https://www.zhipin.com/web/geek/jobs"
             f"?query={q}&city={self.get('search.city')}&page={page}"
+            + (f"&jobType={job_type}" if job_type else "")
         )
 
 

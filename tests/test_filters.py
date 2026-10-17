@@ -86,6 +86,12 @@ def test_internship():
     check_true("job_type 缺失靠标题", looks_like_internship({"title": "推荐算法 Intern"}))
     check("全职被否", looks_like_internship({"job_type": "全职", "title": "算法工程师"}), False)
     check("无关岗位被否", looks_like_internship({"title": "前端开发工程师"}), False)
+    check_true("类型未知但有到岗天数 + 按天计薪算实习", looks_like_internship(
+        {"title": "全栈工程师", "job_type": "未知", "salary": "300-400元/天",
+         "tags": ["4天/周", "3个月", "本科"]}))
+    check("类型未知、毫无实习迹象仍否", looks_like_internship(
+        {"title": "大模型算法工程师", "job_type": "未知", "salary": "20-30K",
+         "tags": ["3-5年", "硕士"]}), False)
     # 校招全职被模型误标成实习（实测：华为「算法工程师 20-40K」，标签 在校/应届·硕士）
     check("校招被模型误标实习也否", looks_like_internship(
         {"job_type": "实习", "title": "算法工程师", "salary": "20-40K",
@@ -138,6 +144,32 @@ def test_evaluate():
     v = evaluate(_job(fit="可转投"), RULES)
     check_true("可转投放行", v.ok)
     check("可转投得分 1", v.score, 1.0)
+
+    # 产品 / 测试：日薪区间**最低值** ≥800 按本档（同最匹配）投；
+    # 不够时测试降成可转投照投，产品不投
+    gated = Rules(require_city="北京",
+                  fit_scores={"最匹配": 3.0, "可转投": 1.0, "产品": 3.0, "测试": 3.0},
+                  fit_min_low_wage={"产品": 800, "测试": 800},
+                  fit_fallback={"测试": "可转投"})
+    v = evaluate(_job(title="AI产品经理实习生", fit="产品", salary="800-1000元/天"), gated)
+    check_true("产品 800-1000 放行", v.ok)
+    check("产品高薪得分同最匹配", v.score, 3.0)
+    v = evaluate(_job(title="产品实习生", fit="产品", salary="600-900元/天"), gated)
+    check("产品 600-900 最低值不够被拒", v.ok, False)
+    check_true("拒绝理由写明门槛", any("最低 600 < 800" in r for r in v.reasons))
+    v = evaluate(_job(title="测试开发实习生", fit="测试", salary="800-900元/天"), gated)
+    check("测试高薪得分同最匹配", (v.ok, v.score), (True, 3.0))
+    v = evaluate(_job(title="测试开发实习生", fit="测试", salary="400-500元/天"), gated)
+    check("测试 800 以下降成可转投", (v.ok, v.score), (True, 1.0))
+    check_true("降档写进理由", any("按「可转投」投" in r for r in v.reasons))
+    v = evaluate(_job(title="测试实习生", fit="测试", salary="200-300元/天"), gated)
+    check("降档后日薪中位下限照样生效", v.ok, False)
+    v = evaluate(_job(title="产品实习生", fit="产品", salary="面议"),
+                 Rules(require_city="北京", allow_unparsable=True,
+                       fit_scores={"产品": 3.0}, fit_min_low_wage={"产品": 800}))
+    check("读不出薪资的产品岗不投", v.ok, False)
+    check_true("门槛不影响其他档位",
+               evaluate(_job(fit="最匹配", salary="400-500元/天"), gated).ok)
 
     # 模型判定不可用 → 不发
     v = evaluate(_job(fit="不可用"), RULES)

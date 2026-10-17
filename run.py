@@ -7,7 +7,9 @@
     python run.py greet --live    # 强制实发（覆盖配置，会二次确认）
     python run.py greet --limit 3 # 本次最多发 3 条
     python run.py greet --auto    # 无人值守：实发、不确认、出错自动重启，投到平台额度用完
+    python run.py greet --dry     # 强制演练（覆盖配置，QQ「演练」指令用它）
     python run.py stats           # 看历史记录
+    python run.py bot             # QQ 机器人：推送投递结果、接收大号的遥控指令
 """
 from __future__ import annotations
 
@@ -25,12 +27,36 @@ from autoboss import prompts
 from autoboss.agent import GreetAgent
 from autoboss.browser import BrowserSession
 from autoboss.deepseek import DeepSeek, DeepSeekError
+from autoboss.lock import BrowserLock
+from autoboss.qq import Notifier
 from autoboss.store import Store
 from autoboss.vision import Vision
 
 
 def new_run_id() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+# 浏览器已被别的进程占用时的退出码。QQ bot 靠它区分「没启动」和「崩溃」。
+EXIT_BUSY = 3
+
+
+def with_browser_lock(fn):
+    """包装要用浏览器的命令：同一时间只允许一个进程操作浏览器。"""
+    def wrapper(cfg, args):
+        lock = BrowserLock(cfg.lock_path)
+        if not lock.acquire():
+            print("✗ 已经有一个任务在使用浏览器（daily_greet.bat、命令行或 QQ 启动的投递，"
+                  "或者 login / doctor）。\n  等它结束，或者在 QQ 上发「/停止」后再试。")
+            return EXIT_BUSY
+        try:
+            # 拿到锁 = 没有别的投递在跑，残留的停止标记一定是过期的
+            cfg.stop_flag.unlink(missing_ok=True)
+            return fn(cfg, args)
+        finally:
+            cfg.stop_flag.unlink(missing_ok=True)
+            lock.release()
+    return wrapper
 
 
 def build(cfg, run_id: str, verbose: bool = True):
@@ -62,22 +88,14 @@ def cmd_doctor(cfg, args):
     print(f"  视觉模型    {cfg.get('deepseek.vision_model')}")
     print(f"  今日上限    {cfg.get('limits.daily_cap')}")
     print(f"  dry_run     {cfg.get('safety.dry_run')}")
-    profile = cfg.section("profile")
-    if not profile.get("highlights"):
-        print("  ⚠  [profile].highlights 是空的 —— 招呼语会显得空洞，建议填 1~2 条硬成绩")
-        ok = False
-    else:
-        print(f"  个人背景    {len(profile.get('highlights', []))} 条成绩，"
-              f"{len(profile.get('skills', []))} 项技能")
-
     # 求职者画像：没有它就没法判断岗位能不能投，greet 会直接停机
     kb_file = Path(str(cfg.get("resume.kb_path", "resume/kb.md")))
     if kb_file.is_file() and kb_file.read_text(encoding="utf-8").strip():
         print(f"  求职画像    {kb_file}（{len(kb_file.read_text(encoding='utf-8'))} 字）")
     else:
         print(f"  ✗ 找不到求职者画像：{kb_file}")
-        print("     它是判断岗位能不能投的唯一依据。把简历交给模型，让它总结出")
-        print("     「哪些岗位族可以投、优先级如何」，存成这个 markdown 文件。")
+        print("     它是判断岗位能不能投的唯一依据。照 README「生成求职者画像」一节，")
+        print("     让 DeepSeek 读你的简历生成，存成这个文件（格式见 resume/kb.example.md）。")
         ok = False
 
     # 2) API key
@@ -217,7 +235,39 @@ def _start_log() -> Path:
 
 
 # 这些结束方式说明"今天到此为止"或"需要人来处理"，不该自动重启
-_FINAL_KINDS = {"done", "quota", "captcha", "login", "stop", "interrupt"}
+_FINAL_KINDS = {"done", "quota", "dry", "captcha", "login", "stop", "interrupt"}
+
+_KIND_TEXT = {"done": "所有来源都走完了", "quota": "额度已满",
+              "dry": "连续好几屏都没有可投的岗位，先停下，过段时间再投",
+              "captcha": "出现验证码，请人工处理后重跑",
+              "login": "需要扫码登录：先运行 python run.py login",
+              "stop": "按规则停机（见日志）", "interrupt": "已中断",
+              "error": "异常退出（见日志）"}
+
+
+def _notify_end(notifier, cfg, kind: str, stats: dict, dry_run: bool, why: str = ""):
+    """一次投递任务结束时推一条总结。--auto 中途重启不算结束。"""
+    if not notifier.enabled:
+        return
+    import sqlite3
+    conn = sqlite3.connect(str(cfg.db_path))
+    try:
+        today = conn.execute(
+            "SELECT COUNT(*) FROM greeted WHERE status='sent' "
+            "AND substr(greeted_at,1,10)=?", (datetime.now().strftime("%Y-%m-%d"),)
+        ).fetchone()[0]
+    except sqlite3.OperationalError:
+        today = 0
+    finally:
+        conn.close()
+    icon = {"done": "✅", "quota": "✅", "dry": "⏸"}.get(kind, "⚠️")
+    head = "演练" if dry_run else "投递"
+    count = (f"演练 {stats.get('dry_run', 0)}" if dry_run
+             else f"发出 {stats.get('sent', 0)}")
+    notifier.send(f"{icon} {head}任务结束：{_KIND_TEXT.get(kind, kind)}\n"
+                  f"{count} · 失败 {stats.get('failed', 0)} · "
+                  f"过滤 {stats.get('filtered', 0)}\n今日累计已投 {today} 条"
+                  + (f"\n过滤原因：{why}" if why else ""))
 
 
 def cmd_greet(cfg, args):
@@ -226,7 +276,7 @@ def cmd_greet(cfg, args):
     if args.auto:
         return _greet_auto(cfg, args)
 
-    live = args.live
+    live = args.live and not args.dry
     if live:
         print("\n" + "!" * 62)
         print("  实发模式：程序会真实点击「立即沟通」并发送消息。")
@@ -244,12 +294,16 @@ def cmd_greet(cfg, args):
     # 注意这里必须是 False 而不是 None：
     # GreetAgent 里 dry_run=None 表示"读配置"，而配置默认 dry_run=true，
     # 所以传 None 会让 --live 静默退化成演练模式。
+    notifier = Notifier(cfg)
+    dry = True if args.dry else (False if live else None)
     agent = GreetAgent(cfg, client, session, store, vision,
-                       limit=args.limit, dry_run=(False if live else None))
+                       limit=args.limit, dry_run=dry, notifier=notifier)
     try:
         agent.run()
     finally:
         store.close()
+        _notify_end(notifier, cfg, agent.stop_kind or "error", agent.stats, agent.dry_run,
+                    agent.filter_summary())
     return 0
 
 
@@ -260,16 +314,20 @@ def _greet_auto(cfg, args, max_restarts: int = 5, wait_sec: float = 60.0):
     推荐流和搜索结果会从头扫，被过滤过的岗位只多花一次读屏。
     """
     restarts = 0
+    totals = {"sent": 0, "failed": 0, "filtered": 0}
+    limit = args.limit
     while True:
         print(f"\n[auto] 第 {restarts + 1} 轮开始（{datetime.now():%H:%M:%S}）")
         cfg = cfgmod.load()        # 每轮重读配置，中途改了 config.toml 也能生效
+        notifier = Notifier(cfg)
         kind = "error"
         store = None
+        agent = None
         try:
             run_id = new_run_id()
             client, store, vision, session = build(cfg, run_id)
             agent = GreetAgent(cfg, client, session, store, vision,
-                               limit=args.limit, dry_run=False)
+                               limit=limit, dry_run=False, notifier=notifier)
             agent.run()
             kind = agent.stop_kind or "done"
         except KeyboardInterrupt:
@@ -280,21 +338,36 @@ def _greet_auto(cfg, args, max_restarts: int = 5, wait_sec: float = 60.0):
         finally:
             if store is not None:
                 store.close()
+            if agent is not None:
+                for k in totals:
+                    totals[k] += agent.stats.get(k, 0)
 
         if kind in _FINAL_KINDS:
-            reason = {"done": "所有来源都走完了", "quota": "额度已满",
-                      "captcha": "出现验证码，请人工处理后重跑",
-                      "login": "需要扫码登录：先运行 python run.py login",
-                      "stop": "按规则停机（见上方原因）",
-                      "interrupt": "已中断"}[kind]
-            print(f"\n[auto] 结束：{reason}")
-            return 0 if kind in ("done", "quota") else 1
+            print(f"\n[auto] 结束：{_KIND_TEXT[kind]}")
+            _notify_end(notifier, cfg, kind, totals, False,
+                        agent.filter_summary() if agent is not None else "")
+            return 0 if kind in ("done", "quota", "dry") else 1
+
+        # --limit 是整个任务的上限，重启后只投剩下的
+        if args.limit is not None:
+            limit = args.limit - totals["sent"]
+            if limit <= 0:
+                print(f"\n[auto] 结束：已投满 {args.limit} 条")
+                _notify_end(notifier, cfg, "quota", totals, False)
+                return 0
 
         restarts += 1
+        if cfg.stop_flag.exists():
+            print("\n[auto] 收到 QQ 停止指令，不再重启")
+            _notify_end(notifier, cfg, "stop", totals, False)
+            return 1
         if restarts > max_restarts:
             print(f"\n[auto] 连续出错 {max_restarts} 次，放弃。看日志排查。")
+            _notify_end(notifier, cfg, "error", totals, False)
             return 1
         print(f"[auto] {wait_sec:.0f} 秒后自动重启（第 {restarts}/{max_restarts} 次）…")
+        notifier.send(f"⚠️ 这一轮异常退出，{wait_sec:.0f} 秒后自动重启"
+                      f"（第 {restarts}/{max_restarts} 次）")
         time.sleep(wait_sec)
 
 
@@ -341,6 +414,14 @@ def cmd_stats(cfg, args):
 
 
 # ===========================================================================
+#  bot
+# ===========================================================================
+def cmd_bot(cfg, args):
+    from autoboss.qqbot import QQBot
+    return QQBot(cfg, Path(__file__).resolve()).run()
+
+
+# ===========================================================================
 def main():
     parser = argparse.ArgumentParser(
         prog="run.py",
@@ -361,16 +442,22 @@ def main():
     p_greet.add_argument("--auto", action="store_true",
                          help="无人值守：实发、不确认、出错自动重启，直到平台额度用完")
 
+    p_greet.add_argument("--dry", action="store_true",
+                         help="强制演练（覆盖 config 里的 dry_run，优先于 --live）")
+
     sub.add_parser("stats", help="查看历史记录")
+
+    sub.add_parser("bot", help="QQ 机器人：推送投递结果，接收大号的遥控指令")
 
     args = parser.parse_args()
     cfg = cfgmod.load()
 
     handlers = {
-        "doctor": cmd_doctor,
-        "login": cmd_login,
-        "greet": cmd_greet,
+        "doctor": with_browser_lock(cmd_doctor),
+        "login": with_browser_lock(cmd_login),
+        "greet": with_browser_lock(cmd_greet),
         "stats": cmd_stats,
+        "bot": cmd_bot,
     }
     try:
         return handlers[args.cmd](cfg, args)
