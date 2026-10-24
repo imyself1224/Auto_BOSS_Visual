@@ -343,6 +343,30 @@ def test_bot_config_command():
                    "≥300 元/天（区间取中位）（config.toml）" in text)
 
 
+def test_bot_config_reset():
+    with tempfile.TemporaryDirectory() as tmp:
+        bot = make_bot(tmp)
+        bot.handle("学历 硕士")
+        bot.handle("薪资 800")
+        bot.handle("关键词 大模型算法 Agent")
+        check_true("设置文件存在", bot.prefs_path.exists())
+        check_true("关键词文件存在", bot.keywords_path.exists())
+
+        reply = bot.handle("配置 清空")
+        check_true("提示已恢复最开始的状态", "已恢复最开始的状态" in reply)
+        check("学历/薪资文件被删掉", bot.prefs_path.exists(), False)
+        check("关键词文件被删掉", bot.keywords_path.exists(), False)
+
+        text = bot.handle("配置")
+        check_true("学历回到 config", "不限（config.toml）" in text)
+        check_true("日薪回到 config",
+                   "≥300 元/天（区间取中位）（config.toml）" in text)
+        check_true("关键词回到 config", "（config.toml）" in text)
+        check_true("状态也回到 config", "按 config.toml" in bot.handle("状态"))
+
+        check_true("不认识的配置参数会提示", "只支持" in bot.handle("配置 随便"))
+
+
 def test_bot_keywords_set_and_clear():
     with tempfile.TemporaryDirectory() as tmp:
         bot = make_bot(tmp)
@@ -609,7 +633,7 @@ if __name__ == "__main__":
                test_agent_notifies_each_sent_job, test_agent_stops_on_remote_flag,
                test_bot_only_obeys_owner_private_chat, test_bot_command_parsing,
                test_bot_education_and_salary_commands,
-               test_bot_config_command,
+               test_bot_config_command, test_bot_config_reset,
                test_bot_keywords_set_and_clear, test_bot_start_passes_keywords_to_greet,
                test_bot_today_lists_sent_jobs, test_lock_is_exclusive_and_freed_on_kill,
                test_greet_refused_while_browser_busy, test_bot_sees_task_started_elsewhere,

@@ -60,6 +60,7 @@ HELP = """🤖 auto_boss 指令（以 / 开头）
 
 🔧 查看
 /配置              查看当前全部要求（学历 / 薪资 / 关键词 / 其他硬条件）
+/配置 清空         恢复最开始的状态：关键词用 config.toml、学历不限、日薪 300
 /状态              是否在跑、今日已投多少、当前学历薪资
 
 /停止              让正在跑的任务收尾退出
@@ -243,7 +244,7 @@ class QQBot:
         if cmd in ("薪资", "日薪", "工资", "salary", "wage"):
             return self.wage_cmd(" ".join(rest))
         if cmd in ("配置", "设置", "config", "cfg"):
-            return self.config_cmd()
+            return self.config_cmd(rest)
         if cmd in ("关键词", "检索词", "keywords", "kw"):
             return self.keyword_cmd(" ".join(rest))
         if cmd in ("停止", "stop"):
@@ -379,8 +380,25 @@ class QQBot:
             limit = 5                 # 「/演练」默认 5 条
         return self.start(live=live, limit=limit, prefs=self._prefs())
 
-    def config_cmd(self) -> str:
-        """「/配置」：当前真正生效的全部要求，一眼看全。"""
+    def config_cmd(self, rest: list[str] | None = None) -> str:
+        """「/配置」查看；「/配置 清空」恢复最开始的状态。"""
+        rest = list(rest or [])
+        if rest:
+            if len(rest) == 1 and preferences.is_clear(rest[0]):
+                return self.reset_cmd()
+            return ("❌ 「/配置」只支持不带参数（查看）或「/配置 清空」"
+                    "（恢复最开始的状态）")
+        return self._config_text()
+
+    def reset_cmd(self) -> str:
+        """清掉 QQ 上设的关键词 / 学历 / 薪资，全部回到 config.toml。"""
+        self.keywords_path.unlink(missing_ok=True)
+        self.prefs_path.unlink(missing_ok=True)
+        return ("✅ 已恢复最开始的状态：关键词、学历、薪资都回到 config.toml。\n\n"
+                + self._config_text())
+
+    def _config_text(self) -> str:
+        """当前真正生效的全部要求，一眼看全。"""
         cfg = self.cfg
         try:
             # bot 可能已经常驻好几天，config.toml 改完要能立即反映出来
