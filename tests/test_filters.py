@@ -246,10 +246,10 @@ def test_evaluate():
 
 
 # ===========================================================================
-# 学历：只投要求不高于「我的最高学历」的岗位
+# 学历：岗位要求的学历必须落在 [最低, 最高] 区间里
 # ===========================================================================
 EDU_RULES = Rules(require_internship=True, min_daily_wage=300, require_city="北京",
-                  fit_scores={"最匹配": 3.0}, max_education="本科")
+                  fit_scores={"最匹配": 3.0}, education_min="", education_max="本科")
 
 
 def test_job_education():
@@ -258,22 +258,22 @@ def test_job_education():
     check("标签里的学历", job_education({"tags": ["4天/周", "本科"]}), "本科")
     check("本科及以上按本科算",
           job_education({"tags": ["学历：本科及以上"]}), "本科")
-    check("学历不限视作不拦", job_education({"tags": ["学历不限"]}), "")
+    check("学历不限是明确的档位", job_education({"tags": ["学历不限"]}), "不限")
     check("读不到就是空", job_education({"tags": ["4天/周", "6个月"]}), "")
     check("标题里的学历也能认",
           job_education({"title": "大模型算法实习生（硕士及以上）"}), "硕士")
 
 
-def test_education_filter():
+def test_education_range_filter():
     v = evaluate(_job(tags=["4天/周", "本科"]), EDU_RULES)
-    check_true("要求本科 = 我的学历，放行", v.ok)
+    check_true("要求本科 = 上限，放行", v.ok)
 
     v = evaluate(_job(tags=["4天/周", "大专"]), EDU_RULES)
-    check_true("要求大专低于本科，放行", v.ok)
+    check_true("要求大专低于上限，放行", v.ok)
 
     v = evaluate(_job(tags=["4天/周", "硕士"]), EDU_RULES)
-    check("要求硕士高于本科，拒绝", v.ok, False)
-    check_true("理由写明学历不够", any("高于你的学历" in r for r in v.reasons))
+    check("要求硕士高于上限，拒绝", v.ok, False)
+    check_true("理由写明高于最高学历", any("高于最高学历" in r for r in v.reasons))
 
     v = evaluate(_job(education="博士"), EDU_RULES)
     check("显式博士要求，拒绝", v.ok, False)
@@ -283,8 +283,24 @@ def test_education_filter():
 
     v = evaluate(_job(tags=["4天/周", "硕士"]),
                  Rules(require_internship=True, min_daily_wage=300, require_city="北京",
-                       fit_scores={"最匹配": 3.0}, max_education=""))
-    check_true("没设学历就不拦", v.ok)
+                       fit_scores={"最匹配": 3.0}))
+    check_true("没设学历区间就不拦", v.ok)
+
+    # ---- 最低学历：低于下限的岗位也拒 ----
+    ranged = Rules(require_internship=True, min_daily_wage=300, require_city="北京",
+                   fit_scores={"最匹配": 3.0},
+                   education_min="本科", education_max="硕士")
+    v = evaluate(_job(tags=["本科"]), ranged)
+    check_true("区间内（本科）放行", v.ok)
+    v = evaluate(_job(tags=["硕士"]), ranged)
+    check_true("区间内（硕士）放行", v.ok)
+    v = evaluate(_job(tags=["大专"]), ranged)
+    check("低于最低学历，拒绝", v.ok, False)
+    check_true("理由写明低于最低学历", any("低于最低学历" in r for r in v.reasons))
+    v = evaluate(_job(tags=["博士"]), ranged)
+    check("高于最高学历，拒绝", v.ok, False)
+    v = evaluate(_job(tags=["学历不限"]), ranged)
+    check("「学历不限」按最低档算，低于本科被拒", v.ok, False)
 
 
 def test_salary_unlimited():
@@ -300,7 +316,7 @@ def test_salary_unlimited():
 
 if __name__ == "__main__":
     for fn in (test_wage, test_internship, test_evaluate,
-               test_job_education, test_education_filter, test_salary_unlimited):
+               test_job_education, test_education_range_filter, test_salary_unlimited):
         fn()
     total = PASSED + len(FAILED)
     print(f"通过 {PASSED}/{total}")

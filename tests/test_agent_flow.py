@@ -332,8 +332,9 @@ def test_agent_applies_education_and_wage_overrides():
         # 卡片上读不出学历：不拦（和城市读不到不拦一致）
         {**base, "title": "Agent实习生", "company": "D", "salary": "600元/天"},
     ]}
-    with agent_env([scene] * 3, education="本科", min_wage=500) as (agent, page, store, vision, _):
-        check("学历覆盖成 本科", agent.rules.max_education, "本科")
+    with agent_env([scene] * 3, education=("", "本科"), min_wage=500) as (agent, page, store, vision, _):
+        check("学历下限为空", agent.rules.education_min, "")
+        check("学历上限覆盖成 本科", agent.rules.education_max, "本科")
         check("日薪覆盖成 500", agent.rules.min_daily_wage, 500.0)
         agent._enter_source()
         titles = [j["title"] for j in agent._rank_targets(scene["jobs"])]

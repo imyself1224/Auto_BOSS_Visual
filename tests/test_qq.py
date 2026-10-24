@@ -248,80 +248,46 @@ def test_bot_command_parsing():
                                    prefs.education, prefs.min_wage)) or "ok")
         bot.handle("投递")
         bot.handle("投递 10")
-        bot.handle("投递 大模型算法 Agent")
-        bot.handle("投递 大模型算法、Agent 10")
-        bot.handle("投递 abc")
         bot.handle("演练")
         bot.handle("演练 3")
-        bot.handle("搜索 推荐算法")
         check("指令参数解析", calls,
               [(True, None, None, None, None), (True, 10, None, None, None),
-               (True, None, ["大模型算法", "Agent"], None, None),
-               (True, 10, ["大模型算法", "Agent"], None, None),
-               (True, None, ["abc"], None, None),
-               (False, 5, None, None, None), (False, 3, None, None, None),
-               (True, None, ["推荐算法"], None, None)])
+               (False, 5, None, None, None), (False, 3, None, None, None)])
+
+        # 投递只接受条数：关键词 / 学历 / 薪资都走单独的指令
+        for bad in ("投递 大模型算法 Agent", "投递 本科 300", "投递 abc",
+                    "投递 10 20", "投递 0", "投递 9999"):
+            before = len(calls)
+            reply = bot.handle(bad)
+            check(f"「{bad}」不启动任务", len(calls), before)
+            check_true(f"「{bad}」给出提示", "❌" in reply)
+
+        check_true("搜索指令已取消", "已经取消" in bot.handle("搜索 推荐算法"))
         check_true("未知指令有提示", "不认识" in bot.handle("吃饭"))
         check_true("空闲时停止", "没有任务" in bot.handle("停止"))
         check_true("空闲状态", "空闲" in bot.handle("状态"))
 
 
-def test_bot_education_and_salary_in_task_cmd():
-    """「/投递 岗位 学历 日薪」三样合并成一条指令。"""
-    with tempfile.TemporaryDirectory() as tmp:
-        bot = make_bot(tmp)
-        calls = []
-        bot.start = (lambda live, limit, keywords=None, prefs=None:
-                     calls.append((live, limit, keywords, prefs)) or "ok")
-
-        reply = bot.handle("投递 大模型算法 本科 300")
-        check_true("回复里确认记住了", "已记住" in reply)
-        prefs = bot._prefs()
-        check("学历落盘", prefs.education, "本科")
-        check("日薪落盘", prefs.min_wage, 300.0)
-        live, limit, keywords, passed = calls[-1]
-        check("关键词照旧解析", keywords, ["大模型算法"])
-        check("没写条数", limit, None)
-        check("start 收到学历", passed.education, "本科")
-        check("start 收到日薪", passed.min_wage, 300.0)
-
-        # 下次不带学历/薪资时沿用上一次的设置
-        bot.handle("投递 推荐算法")
-        check("学历沿用", calls[-1][3].education, "本科")
-        check("日薪沿用", calls[-1][3].min_wage, 300.0)
-
-        # 演练命令同样认这组参数；裸数字 <40 是条数，≥40 是日薪
-        bot.handle("演练 大模型算法 硕士 500 10")
-        live, limit, keywords, passed = calls[-1]
-        check("演练模式", live, False)
-        check("条数 10", limit, 10)
-        check("学历换成了硕士", passed.education, "硕士")
-        check("日薪换成 500", passed.min_wage, 500.0)
-
-        # 一次清掉两项
-        bot.handle("投递 学历不限 薪资不限")
-        prefs = bot._prefs()
-        check("学历清空", prefs.education, "")
-        check("薪资清空", prefs.min_wage, 0.0)
-
-        # 「本科及以上」是岗位要求写法，不能当成求职者学历，且不能启动任务
-        before = len(calls)
-        bad = bot.handle("投递 大模型算法 本科及以上 300")
-        check_true("提示这是岗位要求写法", "岗位要求" in bad)
-        check("错误指令不启动任务", len(calls), before)
-
-
-def test_bot_education_and_salary_commands():
+def test_bot_education_range_and_salary_commands():
     with tempfile.TemporaryDirectory() as tmp:
         bot = make_bot(tmp)
 
-        reply = bot.handle("学历 硕士")
-        check_true("设定学历成功", "已设定学历" in reply)
-        check("学历已保存", bot._prefs().education, "硕士")
+        reply = bot.handle("学历 本科 硕士")
+        check_true("设定学历区间成功", "已设定学历区间" in reply)
+        check("学历区间已保存", bot._prefs().education, ("本科", "硕士"))
+        check_true("能查看设置", "本科 – 硕士" in bot.handle("学历"))
+
+        # 只写一个 = 只看这一档
+        bot.handle("学历 硕士")
+        check("单档按最低=最高处理", bot._prefs().education, ("硕士", "硕士"))
 
         reply = bot.handle("学历 本科及以上")
         check_true("岗位要求写法被拦下", "岗位要求" in reply)
-        check("设置没被改掉", bot._prefs().education, "硕士")
+        check("设置没被改掉", bot._prefs().education, ("硕士", "硕士"))
+
+        reply = bot.handle("学历 硕士 本科")
+        check_true("最低高于最高被拦下", "不能高于" in reply)
+        check("设置没被改掉", bot._prefs().education, ("硕士", "硕士"))
 
         reply = bot.handle("薪资 8k")
         check_true("设定薪资成功", "已设定日薪" in reply)
@@ -331,17 +297,50 @@ def test_bot_education_and_salary_commands():
         check_true("离谱的薪资被拒绝", "❌" in reply)
         check("设置没被改掉", bot._prefs().min_wage, 367.8)
 
-        check_true("能查看设置", "🎓 学历：硕士" in bot.handle("学历"))
-        check_true("能查看设置（薪资）", "≥367.8" in bot.handle("薪资"))
-        check_true("状态里也显示", "学历 硕士" in bot.handle("状态"))
+        check_true("能查看薪资设置", "≥367.8" in bot.handle("薪资"))
+        check_true("状态里也显示", "硕士" in bot.handle("状态"))
 
-        bot.handle("学历 不限")
-        check("学历清成不限", bot._prefs().education, "")
+        bot.handle("学历 不限 不限")
+        check("学历清成不限", bot._prefs().education, ("", ""))
         bot.handle("薪资 不限")
         check("薪资清成不限", bot._prefs().min_wage, 0.0)
-        check_true("状态里显示不限", "学历 不限" in bot.handle("状态"))
         check_true("删掉文件就回到 config 的说法写在帮助里",
                    ".qq_prefs.json" in bot.handle("学历"))
+
+
+def test_bot_config_command():
+    with tempfile.TemporaryDirectory() as tmp:
+        bot = make_bot(tmp)
+        text = bot.handle("配置")
+        check_true("有标题", "当前投递配置" in text)
+        check_true("有学历", "学历要求" in text)
+        check_true("有薪资", "日薪下限" in text)
+        check_true("有关键词", "检索关键词" in text)
+        check_true("有城市", "城市 北京" in text)
+        check_true("标明来源", "config.toml" in text)
+
+        bot.handle("学历 不限 硕士")
+        bot.handle("薪资 300")
+        bot.handle("关键词 大模型算法 Agent")
+        text = bot.handle("配置")
+        check_true("显示 QQ 设定的学历", "不限 – 硕士（QQ 设定）" in text)
+        check_true("显示 QQ 设定的薪资",
+                   "≥300 元/天（区间取中位）（QQ 设定）" in text)
+        check_true("显示 2 个关键词", "2 个（QQ 设定）" in text)
+        check_true("列出关键词", "大模型算法" in text)
+
+        bot.handle("学历 不限 不限")
+        bot.handle("薪资 不限")
+        bot.handle("关键词 清空")
+        text = bot.handle("配置")
+        check_true("明确不限也算 QQ 设定", "不限（QQ 设定）" in text)
+
+        # 删掉设置文件才回到 config.toml
+        bot.prefs_path.unlink()
+        text = bot.handle("配置")
+        check_true("回落到 config 的学历", "不限（config.toml）" in text)
+        check_true("回落到 config 的日薪",
+                   "≥300 元/天（区间取中位）（config.toml）" in text)
 
 
 def test_bot_keywords_set_and_clear():
@@ -379,16 +378,20 @@ def test_bot_start_passes_keywords_to_greet():
         bot._set_pending(["大模型算法", "Agent"])
         from autoboss.preferences import Prefs
         reply = bot.start(live=True, limit=10,
-                          prefs=Prefs(education="本科", min_wage=300.0))
+                          prefs=Prefs(education=("", "本科"), min_wage=300.0))
         argv = captured["argv"]
         check_true("子进程带上了 --keywords", "--keywords" in argv)
         check("关键词用竖线连接",
               argv[argv.index("--keywords") + 1] if "--keywords" in argv else None,
               "大模型算法|Agent")
         check_true("实发走 --auto", "--auto" in argv)
-        check_true("子进程带上了 --education", "--education" in argv)
-        check("学历参数",
-              argv[argv.index("--education") + 1] if "--education" in argv else None,
+        check_true("子进程带上了 --education-min", "--education-min" in argv)
+        check("最低学历参数",
+              argv[argv.index("--education-min") + 1] if "--education-min" in argv else None,
+              "不限")
+        check_true("子进程带上了 --education-max", "--education-max" in argv)
+        check("最高学历参数",
+              argv[argv.index("--education-max") + 1] if "--education-max" in argv else None,
               "本科")
         check_true("子进程带上了 --min-wage", "--min-wage" in argv)
         check("日薪参数",
@@ -396,19 +399,22 @@ def test_bot_start_passes_keywords_to_greet():
               "300")
         check_true("回复里有条数", "最多 10 条" in reply)
         check_true("回复里有关键词数", "2 个关键词" in reply)
-        check_true("回复里有学历", "学历本科" in reply)
+        check_true("回复里有学历区间", "学历不限 – 本科" in reply)
 
         # 「不限」也要显式传下去：它要盖住 config.toml
         bot.proc = None
         bot.start(live=False, limit=None, keywords=["推荐算法"],
-                  prefs=Prefs(education="", min_wage=0.0))
+                  prefs=Prefs(education=("", ""), min_wage=0.0))
         argv = captured["argv"]
         check("指令关键词优先",
               argv[argv.index("--keywords") + 1] if "--keywords" in argv else None,
               "推荐算法")
         check_true("演练走 --dry", "--dry" in argv)
-        check("学历不限也要显式传",
-              argv[argv.index("--education") + 1] if "--education" in argv else None,
+        check("最低学历不限也要显式传",
+              argv[argv.index("--education-min") + 1] if "--education-min" in argv else None,
+              "不限")
+        check("最高学历不限也要显式传",
+              argv[argv.index("--education-max") + 1] if "--education-max" in argv else None,
               "不限")
         check("薪资不限也要显式传",
               argv[argv.index("--min-wage") + 1] if "--min-wage" in argv else None,
@@ -609,8 +615,8 @@ if __name__ == "__main__":
                test_notifier_queues_when_onebot_reports_failure,
                test_agent_notifies_each_sent_job, test_agent_stops_on_remote_flag,
                test_bot_only_obeys_owner_private_chat, test_bot_command_parsing,
-               test_bot_education_and_salary_in_task_cmd,
-               test_bot_education_and_salary_commands,
+               test_bot_education_range_and_salary_commands,
+               test_bot_config_command,
                test_bot_keywords_set_and_clear, test_bot_start_passes_keywords_to_greet,
                test_bot_today_lists_sent_jobs, test_lock_is_exclusive_and_freed_on_kill,
                test_greet_refused_while_browser_busy, test_bot_sees_task_started_elsewhere,

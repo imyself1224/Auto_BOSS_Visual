@@ -9,7 +9,8 @@
     python run.py greet --auto    # 无人值守：实发、不确认、出错自动重启，投到平台额度用完
     python run.py greet --dry     # 强制演练（覆盖配置，QQ「演练」指令用它）
     python run.py greet --keywords "大模型算法 Agent"  # 只搜这几个词（QQ 指令也用它）
-    python run.py greet --education 本科 --min-wage 300  # 学历上限 / 日薪下限（QQ 指令也用它）
+    python run.py greet --education-min 不限 --education-max 硕士 --min-wage 300
+                                # 学历区间 / 日薪下限（QQ 指令也用它）
     python run.py stats           # 看历史记录
     python run.py bot             # QQ 机器人：推送投递结果、接收大号的遥控指令
 """
@@ -92,7 +93,7 @@ def cmd_doctor(cfg, args):
     shown = "、".join(picked[:6]) + ("…" if len(picked) > 6 else "")
     print(f"  关键词      {len(picked)} 个：{shown or '（无）'}")
     print(f"  城市        {cfg.get('search.city')}")
-    print(f"  学历上限    {cfg.get('job_filter.max_education') or '不限'}")
+    print(f"  学历要求    {preferences.education_text(*preferences.education_from_config(cfg))}")
     print(f"  日薪下限    {cfg.get('job_filter.min_daily_wage')}")
     print(f"  视觉模型    {cfg.get('deepseek.vision_model')}")
     print(f"  今日上限    {cfg.get('limits.daily_cap')}")
@@ -298,24 +299,23 @@ def _notify_end(notifier, cfg, kind: str, stats: dict, dry_run: bool,
     notifier.send(msg)
 
 
-def _hard_filters_line(cfg, education: str | None = None,
+def _hard_filters_line(cfg, education: tuple[str, str] | None = None,
                        min_wage: float | None = None) -> str:
     """任务开始推送里的「学历 / 日薪」这一行。
 
     None 表示这次没指定，回落到 config.toml 的值 —— 推给大号的就是**真正生效**的条件。
     """
     if education is None:
-        education = str(cfg.get("job_filter.max_education", "") or "")
+        education = preferences.education_from_config(cfg)
     if min_wage is None:
         min_wage = float(cfg.get("job_filter.min_daily_wage", 0) or 0)
-    education = preferences.normalize_education(education, allow_above=True) or ""
-    edu_text = f"≤{education}" if education else "不限"
+    edu_text = preferences.education_text(*education)
     wage_text = f"中位 ≥{min_wage:g} 元/天" if min_wage > 0 else "不限"
     return f"🎓 学历要求 {edu_text} · 💰 日薪 {wage_text}"
 
 
 def _start_notice(cfg, keywords, dry_run: bool, limit: int | None,
-                  education: str | None = None,
+                  education: tuple[str, str] | None = None,
                   min_wage: float | None = None) -> str:
     """任务开始前推给 QQ 的文字：这次到底搜哪些关键词、按什么条件筛。
 
@@ -344,23 +344,33 @@ def _start_notice(cfg, keywords, dry_run: bool, limit: int | None,
 
 
 def _notify_start(notifier, cfg, keywords, dry_run: bool, limit: int | None,
-                  education: str | None = None, min_wage: float | None = None):
+                  education: tuple[str, str] | None = None,
+                  min_wage: float | None = None):
     text = _start_notice(cfg, keywords, dry_run, limit, education, min_wage)
     print("\n" + text + "\n")
     if notifier.enabled:
         notifier.send(text)
 
 
-def _cli_education(raw) -> str | None:
-    """`--education` 的解析。None = 这次没指定；「不限」规范成空串。"""
-    if raw is None:
-        return None
+def _cli_education_bound(raw, role: str) -> str:
+    """解析一个学历边界。「不限」规范成空串。"""
     value = preferences.normalize_education(raw)
     if value is None:
         raise SystemExit(
-            f"看不懂 --education {raw}：可写 不限 / 大专 / 本科 / 硕士 / 博士"
-            "（填你自己的最高学历，不是「本科及以上」这种岗位要求写法）")
+            f"看不懂 --education-{role} {raw}：可写 不限 / 大专 / 本科 / 硕士 / 博士"
+            "（填档位，不是「本科及以上」这种岗位要求写法）")
     return value
+
+
+def _cli_education(min_raw, max_raw) -> tuple[str, str] | None:
+    """`--education-min/--education-max` → (最低, 最高)；两边都没传 = None（用 config）。"""
+    if min_raw is None and max_raw is None:
+        return None
+    low = _cli_education_bound(min_raw, "min") if min_raw is not None else ""
+    high = _cli_education_bound(max_raw, "max") if max_raw is not None else ""
+    if low and high and preferences.rank_of(low) > preferences.rank_of(high):
+        raise SystemExit(f"最低学历 {low} 不能高于最高学历 {high}")
+    return low, high
 
 
 def _cli_min_wage(raw) -> float | None:
@@ -383,8 +393,9 @@ def cmd_greet(cfg, args):
 
     # QQ 指令 / --keywords 指定的关键词：只搜这些，覆盖 config 的 [search].queries
     words = kwlib.split_keywords(getattr(args, "keywords", "") or "")
-    # 学历 / 日薪：None = 用 config.toml；空串 / 0 = 明确不限
-    education = _cli_education(getattr(args, "education", None))
+    # 学历 / 日薪：None = 用 config.toml；("","") / 0 = 明确不限
+    education = _cli_education(getattr(args, "education_min", None),
+                               getattr(args, "education_max", None))
     min_wage = _cli_min_wage(getattr(args, "min_wage", None))
     notifier = Notifier(cfg)
     if args.auto:
@@ -432,7 +443,8 @@ def cmd_greet(cfg, args):
 def _greet_auto(cfg, args, log_path: Path | None = None,
                 max_restarts: int = 5, wait_sec: float = 60.0,
                 keywords: list[str] | None = None,
-                education: str | None = None, min_wage: float | None = None):
+                education: tuple[str, str] | None = None,
+                min_wage: float | None = None):
     """无人值守：实发，出错就等一会儿重启，直到额度用完 / 来源走完 / 需要人工。
 
     重启是安全的：已发的、已沟通过的都在去重库里，不会重复打招呼；
@@ -447,7 +459,8 @@ def _greet_auto(cfg, args, log_path: Path | None = None,
              else kwlib.split_keywords(getattr(args, "keywords", "") or ""))
     # 学历 / 日薪同理：这是「这一次任务」的条件，自动重启沿用同一份。
     if education is None:
-        education = _cli_education(getattr(args, "education", None))
+        education = _cli_education(getattr(args, "education_min", None),
+                                   getattr(args, "education_max", None))
     if min_wage is None:
         min_wage = _cli_min_wage(getattr(args, "min_wage", None))
     while True:
@@ -587,9 +600,11 @@ def main():
     p_greet.add_argument("--keywords", default="", metavar="关键词",
                          help="只搜这些关键词（空格 / 逗号 / 顿号分隔），"
                               "覆盖 config 的 [search].queries，且不再走推荐流")
-    p_greet.add_argument("--education", default=None, metavar="学历",
-                         help="你的最高学历（不限 / 大专 / 本科 / 硕士 / 博士）；"
-                              "岗位要求高于它的不投。覆盖 config 的 max_education")
+    p_greet.add_argument("--education-min", default=None, metavar="最低学历",
+                         help="岗位学历要求的下限（不限 / 大专 / 本科 / 硕士 / 博士）；"
+                              "覆盖 config 的 education_min")
+    p_greet.add_argument("--education-max", default=None, metavar="最高学历",
+                         help="岗位学历要求的上限；覆盖 config 的 education_max")
     p_greet.add_argument("--min-wage", type=float, default=None, metavar="日薪",
                          help="日薪下限（元/天），0 = 不限；"
                               "覆盖 config 的 min_daily_wage")

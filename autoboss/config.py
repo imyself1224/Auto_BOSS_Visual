@@ -29,8 +29,9 @@ _DEFAULTS: dict[str, dict[str, object]] = {
     "job_filter": {
         "require_internship": True,
         "min_daily_wage": 300.0,
-        # 我自己的最高学历（不限 / 大专 / 本科 / 硕士 / 博士）。空 = 不按学历筛。
-        "max_education": "",
+        # 岗位学历要求的区间（不限 = 该边界不设限；空串同义）
+        "education_min": "",
+        "education_max": "",
         "work_days_per_month": 21.75,
         "allow_unparsable": False,
         "require_city": "北京",
@@ -149,8 +150,8 @@ class Config:
 
     @property
     def qq_prefs_path(self) -> Path:
-        """QQ 上设定的学历 / 日薪（JSON）。发「/学历 不限」「/薪资 不限」取消限制；
-        删掉这个文件就全部回到 config.toml。"""
+        """QQ 上设定的学历区间 / 日薪（JSON）。发「/学历 不限 不限」「/薪资 不限」
+        取消限制；删掉这个文件就全部回到 config.toml。"""
         return PROJECT_ROOT / ".qq_prefs.json"
 
     def search_url(self, page: int = 1, query: str | None = None) -> str:

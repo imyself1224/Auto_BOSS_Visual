@@ -148,16 +148,20 @@ def job_education(job: dict) -> str:
     """卡片上写的**岗位学历要求**，规范名；读不到返回空串。
 
     首选视觉模型单独给的 `education` 字段，其次看标签行，最后在职位标题里找。
-    「学历不限」和读不到都返回空串 —— 两种情况都不该拦人。
+    明确写着「学历不限」时返回「不限」（按最低档算），读不到返回空串（不拦）。
     """
     raw = job.get("education")
     if raw:
         got = preferences.normalize_education(raw, allow_above=True)
+        if got == "":
+            return "不限"
         if got is not None:
             return got
     tags = job.get("tags") or []
     for tag in tags:
         got = preferences.normalize_education(tag, allow_above=True)
+        if got == "":
+            return "不限"
         if got is not None:
             return got
     m = _EDU_WORDS_RE.search(str(job.get("title") or ""))
@@ -173,10 +177,10 @@ class Rules:
     work_days_per_month: float = 21.75
     allow_unparsable: bool = False
     require_city: str = "北京"
-    # 我自己的最高学历（如「本科」）。岗位要求的学历高于它就不投；
+    # 学历要求区间（空串 = 该边界不限）。岗位要求落在区间内才投；
     # 卡片上读不出学历的放行 —— 和城市读不到不拦是同一个原则。
-    # 空串 = 不按学历筛。
-    max_education: str = ""
+    education_min: str = ""
+    education_max: str = ""
     # 档位 → 排序分。模型把岗位跟求职者画像（resume/kb.md）对比后判一个档位
     # （最匹配 / 次匹配 / 可转投 / 不可用）。
     # **表里没有的档位一律不打招呼** —— 所以「不可用」不写进来即可。
@@ -225,15 +229,22 @@ def evaluate(job: dict, rules: Rules) -> Verdict:
     else:
         reasons.append("实习岗")
 
-    # ---- 硬条件 2：学历（岗位要求高于我的最高学历就不投）----
+    # ---- 硬条件 2：学历区间（岗位要求的学历要落在 [最低, 最高] 内）----
     # 读不出学历的卡片放行 —— 和城市读不到不拦是同一个原则。
-    if hard_fail is None and rules.max_education:
-        mine = preferences.rank_of(rules.max_education)
+    # 卡片写着「学历不限」按最低档（rank 0）算，所以最低学历设成本科时会把它筛掉；
+    # 想保留就写 /学历 不限 硕士。
+    low = preferences.rank_of(rules.education_min)
+    high = preferences.rank_of(rules.education_max) or 99
+    if hard_fail is None and (low or high < 99):
         required = job_education(job)
-        if mine and preferences.rank_of(required) > mine:
-            hard_fail = f"要求{required}，高于你的学历{rules.max_education}"
-        elif required:
-            reasons.append(f"学历要求{required}")
+        if required:
+            req_rank = preferences.rank_of(required)
+            if req_rank < low:
+                hard_fail = f"要求{required}，低于最低学历{rules.education_min}"
+            elif req_rank > high:
+                hard_fail = f"要求{required}，高于最高学历{rules.education_max}"
+            else:
+                reasons.append(f"学历要求{required}")
 
     # ---- 硬条件 3：薪资下限（min_daily_wage <= 0 表示「不限」）----
     wage = None

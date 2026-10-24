@@ -122,8 +122,8 @@ def test_start_notice_lists_keywords():
 
     # 学历 / 日薪：QQ 指令带上时要出现在开始通知里
     text = run_mod._start_notice(cfg, ["大模型算法"], dry_run=False, limit=None,
-                                 education="本科", min_wage=500)
-    check_true("带上学历上限", "学历要求 ≤本科" in text)
+                                 education=("", "本科"), min_wage=500)
+    check_true("带上学历区间", "学历要求 不限 – 本科" in text)
     check_true("带上日薪下限", "≥500 元/天" in text)
 
     # 没指定时显示 config.toml 里真正生效的值
@@ -133,20 +133,24 @@ def test_start_notice_lists_keywords():
 
 
 def test_cli_education_and_wage_args():
-    check("不限 → 空串（要盖住 config）", run._cli_education("不限"), "")
-    check("本科", run._cli_education("本科"), "本科")
-    check("没传保持 None", run._cli_education(None), None)
+    check("两个档位", run._cli_education("本科", "硕士"), ("本科", "硕士"))
+    check("不限 → 空串（要盖住 config）", run._cli_education("不限", "本科"),
+          ("", "本科"))
+    check("只传下限时上限不限", run._cli_education("本科", None), ("本科", ""))
+    check("只传上限时下限不限", run._cli_education(None, "硕士"), ("", "硕士"))
+    check("都没传保持 None", run._cli_education(None, None), None)
     check("日薪", run._cli_min_wage(300), 300.0)
     check("0 = 不限", run._cli_min_wage(0), 0.0)
     check("没传保持 None", run._cli_min_wage(None), None)
 
-    for bad in ("本科及以上", "火星"):
+    for low, high in (("本科及以上", "硕士"), ("火星", "硕士"),
+                      ("硕士", "本科")):
         try:
-            run._cli_education(bad)
+            run._cli_education(low, high)
         except SystemExit:
-            check(f"「{bad}」被拒绝", True, True)
+            check(f"「{low} → {high}」被拒绝", True, True)
         else:
-            check(f"「{bad}」应当拒绝", False, True)
+            check(f"「{low} → {high}」应当拒绝", False, True)
 
     try:
         run._cli_min_wage(99999)
