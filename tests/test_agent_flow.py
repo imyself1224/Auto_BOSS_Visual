@@ -234,7 +234,7 @@ def agent_env(scenes, **kw):
 
 
 def make_agent(jobs_per_scene, daily_cap=10, source_mode="recommend", tmp=None,
-               dry_run=True):
+               dry_run=True, keywords=None):
     cfg = cfgmod.load()
     cfg._raw["source"]["mode"] = source_mode
     cfg._raw["limits"]["daily_cap"] = daily_cap
@@ -259,7 +259,7 @@ def make_agent(jobs_per_scene, daily_cap=10, source_mode="recommend", tmp=None,
     store = Store(Path(tmp) / "t.db", "test")
     vision = FakeVision(jobs_per_scene)
     agent = GreetAgent(cfg, client, FakeSession(page), store, vision,
-                       dry_run=dry_run, verbose=False)
+                       dry_run=dry_run, verbose=False, keywords=keywords)
     # 走 run() 时这一步由 run() 完成；测试直接调 _loop / _pick_target 就得自己设
     agent.page = page
     return agent, page, store, vision, client
@@ -407,7 +407,8 @@ def test_repeated_cards_do_not_count_as_dry():
         except StopRun as exc:
             stopped = exc
         check("同一张不可投的卡反复出现，不会触发收工", stopped, None)
-        check("只算了一次新卡", agent._dry_streak, 1)
+        # 换了关键词计数器就清零；后面几个词翻到的都是老卡，不该再累计
+        check("老卡重复出现不累计", agent._dry_streak, 0)
 
 
 def test_job_type_in_url_skips_filter_clicks():
@@ -881,22 +882,80 @@ def test_sources_switch_when_list_ends():
         check("没有空转", vision.list_calls, 6)
 
 
-def test_dry_streak_across_sources_stops_run():
-    """连续好几屏都没有可投的 → 收工（kind=dry），换关键词也不清零，不没头没脑地一直找。"""
+def test_dry_keyword_moves_to_next_source():
+    """一个关键词翻到底都没货 → 换下一个关键词，**不结束整轮任务**。
+
+    回归测试（2026-10-21 22:00 的日志）：搜「大模型算法」时 6 屏全被日薪门槛
+    挡掉，加上「大模型应用」的 2 屏凑满 8 屏，整轮任务就在来源 2/42 收工了，
+    后面 40 个关键词一个都没试到。
+    """
     silence()
-    scene = {"page_state": "job_list", "jobs": []}
-    with agent_env([scene] * 40) as (agent, page, store, vision, _):
-        agent.source_mode = "both"
-        agent.cfg._raw["search"]["queries"] = ["Agent实习", "推荐算法实习", "NLP实习"]
-        agent.max_dry = 5
-        page.scroll = lambda dy, x=None, y=None, tries=4: 0     # 一滚就到底：每个来源 2 屏
+    with agent_env([{"page_state": "job_list", "jobs": []}]) as (agent, page, store, vision, _):
+        # 每读一屏换一批「新岗位，但一个都不能投」——这就是当年的现场
+        counter = {"n": 0}
+        def look(page, prompt, tag="look", max_tokens=1500):
+            n = counter["n"]
+            counter["n"] += 1
+            return {"page_state": "job_list", "jobs": [{
+                **GOOD_JOB, "title": f"不对口实习{n}", "company": f"X{n}",
+                "fit": "不可用"}]}
+        vision.look = look
+        agent.source_mode = "search"
+        agent.cfg._raw["search"]["queries"] = ["大模型算法", "大模型应用", "Agent"]
+        agent.max_dry = 3               # 每个词 3 屏都没货就换下一个
         stopped = None
         try:
             agent._loop()
         except StopRun as exc:
             stopped = exc
-        check("连续 5 屏没有可投就收工", stopped.kind if stopped else None, "dry")
-        check("跨来源累计，第 5 屏就停", vision.list_calls, 5)
+        check("一个词没货不再结束整轮", stopped, None)
+        check("三个词各扫 3 屏", counter["n"], 9)
+        from urllib.parse import quote
+        searched = [u for u in page.visited if "query=" in u]
+        for word in ("大模型算法", "大模型应用", "Agent"):
+            check_true(f"搜了「{word}」", any(quote(word) in u for u in searched))
+
+
+def test_dry_sources_limit_stops_run():
+    """连续多少个来源都没投出去才收工（max_dry_sources），0 = 全部走完。"""
+    silence()
+    with agent_env([{"page_state": "job_list", "jobs": []}]) as (agent, page, store, vision, _):
+        counter = {"n": 0}
+        def look(page, prompt, tag="look", max_tokens=1500):
+            n = counter["n"]
+            counter["n"] += 1
+            return {"page_state": "job_list", "jobs": [{
+                **GOOD_JOB, "title": f"不对口实习{n}", "company": f"Y{n}",
+                "fit": "不可用"}]}
+        vision.look = look
+        agent.source_mode = "search"
+        agent.cfg._raw["search"]["queries"] = ["词一", "词二", "词三"]
+        agent.max_dry = 3
+        agent.max_dry_sources = 2
+        stopped = None
+        try:
+            agent._loop()
+        except StopRun as exc:
+            stopped = exc
+        check("连续 2 个来源没货就收工", stopped.kind if stopped else None, "dry")
+        check("第三个词没再搜", counter["n"], 6)
+
+
+def test_override_keywords_search_only():
+    """--keywords / QQ 指定关键词时只搜这些词，不掺推荐流。"""
+    silence()
+    scene = {"page_state": "job_list", "jobs": []}
+    with agent_env([scene] * 10, source_mode="both",
+                   keywords=["大模型算法", "Agent"]) as (agent, page, *_):
+        agent.cfg._raw["search"]["queries"] = ["配置里的词"]
+        agent.cfg._raw["source"]["recommend_last"] = True
+        check("来源只有指定的关键词", agent._sources(),
+              [("search", "大模型算法"), ("search", "Agent")])
+        page.scroll = lambda dy, x=None, y=None, tries=4: 0     # 一滚就到底
+        agent._loop()
+        searched = [u for u in page.visited if "query=" in u]
+        check("只搜了这两个词", len(searched), 2)
+        check("一次都没进推荐流", len(page.visited), 2)
 
 
 def test_platform_quota_text_stops_run():
@@ -954,7 +1013,8 @@ if __name__ == "__main__":
                test_daily_cap_stops, test_dry_run_never_clicks,
                test_card_title_paren_width_mismatch,
                test_platform_quota_text_stops_run,
-               test_sources_switch_when_list_ends, test_dry_streak_across_sources_stops_run,
+               test_sources_switch_when_list_ends, test_dry_keyword_moves_to_next_source,
+               test_dry_sources_limit_stops_run, test_override_keywords_search_only,
                test_job_type_in_url_skips_filter_clicks, test_recommend_last_puts_search_first,
                test_repeated_cards_do_not_count_as_dry,
                test_card_clicked_by_title_and_company,

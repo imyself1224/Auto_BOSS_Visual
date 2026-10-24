@@ -15,6 +15,8 @@ resume/*
 !resume/kb.example.md
 .stop_request
 .browser.lock
+# QQ 上「/关键词 ...」设定的临时检索关键词
+.qq_keywords.txt
 
 # SnowLuma（QQ 托管）：第三方程序 + 它的配置/登录数据，不上传
 SnowLuma/

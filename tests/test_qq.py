@@ -48,7 +48,8 @@ def check_true(name, cond):
 class FakeOneBot:
     """本地假 OneBot 正向 WS 服务：记下收到的动作和鉴权头。"""
 
-    def __init__(self):
+    def __init__(self, retcode: int = 0):
+        self.retcode = retcode
         self.received: list[dict] = []
         self.auth: list[str | None] = []
         self.server = serve(self._handler, "127.0.0.1", 0)
@@ -58,7 +59,15 @@ class FakeOneBot:
     def _handler(self, ws):
         self.auth.append(ws.request.headers.get("Authorization"))
         for raw in ws:
-            self.received.append(json.loads(raw))
+            data = json.loads(raw)
+            self.received.append(data)
+            # 真实的 OneBot 会回一条带同样 echo 的动作回执
+            if isinstance(data, dict) and data.get("echo"):
+                ws.send(json.dumps({
+                    "status": "ok" if self.retcode in (0, 1) else "failed",
+                    "retcode": self.retcode,
+                    "echo": data["echo"],
+                }))
 
     def close(self):
         self.server.shutdown()
@@ -102,7 +111,41 @@ def test_notifier_disabled_or_down_is_harmless():
     check("没启用时不发", Notifier(make_cfg(enabled=False)).send("x"), False)
     check("没填大号时不发", Notifier(make_cfg(owner=0)).send("x"), False)
     # 端口 1 上没有服务：要返回 False，不能抛异常打断投递
-    check("连不上时返回 False 不抛", Notifier(make_cfg(port=1)).send("x"), False)
+    # outbox 指到临时目录，别把测试消息留在真实的 logs/ 里（下次连上会被补发）
+    n = Notifier(make_cfg(port=1))
+    n.outbox_dir = Path(tempfile.mkdtemp(prefix="qq_outbox_test_"))
+    check("连不上时返回 False 不抛", n.send("x"), False)
+    check("断网时消息存进 outbox", len(list(n.outbox_dir.glob("*.json"))), 1)
+
+
+def test_notifier_flushes_outbox_when_back_online():
+    fake = FakeOneBot()
+    try:
+        n = Notifier(make_cfg(fake.port))
+        n.outbox_dir = Path(tempfile.mkdtemp(prefix="qq_outbox_test_"))
+        # 先制造一条断网消息
+        n._enqueue("断网时的通知")
+        check("补发成功", n.flush(), True)
+        wait_for(lambda: fake.received)
+        check("补发了 1 条", len(fake.received), 1)
+        check("补发内容正确",
+              fake.received[0].get("params", {}).get("message") if fake.received else "",
+              "断网时的通知")
+        check("发完清空 outbox", len(list(n.outbox_dir.glob("*.json"))), 0)
+    finally:
+        fake.close()
+
+
+def test_notifier_queues_when_onebot_reports_failure():
+    # 断网时本地 WS 还通，但 OneBot 发 QQ 会失败并回 retcode != 0
+    fake = FakeOneBot(retcode=1200)
+    try:
+        n = Notifier(make_cfg(fake.port))
+        n.outbox_dir = Path(tempfile.mkdtemp(prefix="qq_outbox_test_"))
+        check("回执失败 → send 返回 False", n.send("发不出去"), False)
+        check("消息存进 outbox", len(list(n.outbox_dir.glob("*.json"))), 1)
+    finally:
+        fake.close()
 
 
 def test_agent_notifies_each_sent_job():
@@ -154,9 +197,12 @@ class FakeBotConn:
 
 def make_bot(tmp: str) -> QQBot:
     cfg = make_cfg()
-    # 指到临时库，别读真实记录（只改这个实例的类，不污染 Config 本身）
-    cfg.__class__ = type("TmpConfig", (cfgmod.Config,),
-                         {"db_path": property(lambda self: Path(tmp) / "t.db")})
+    # 指到临时库 / 临时文件，别读真实记录，也别在项目根目录留下关键词文件
+    # （只改这个实例的类，不污染 Config 本身）
+    cfg.__class__ = type("TmpConfig", (cfgmod.Config,), {
+        "db_path": property(lambda self: Path(tmp) / "t.db"),
+        "stop_flag": property(lambda self: Path(tmp) / ".stop_request"),
+        "qq_keywords_path": property(lambda self: Path(tmp) / ".qq_keywords.txt")})
     bot = QQBot(cfg, Path(__file__).resolve().parent.parent / "run.py")
 
     # ★ 测试绝不能真的起投递进程 —— 那会用真实配置去 BOSS 直聘实发 ★
@@ -196,17 +242,79 @@ def test_bot_command_parsing():
     with tempfile.TemporaryDirectory() as tmp:
         bot = make_bot(tmp)
         calls = []
-        bot.start = lambda live, limit: calls.append((live, limit)) or "ok"
+        bot.start = (lambda live, limit, keywords=None:
+                     calls.append((live, limit, keywords)) or "ok")
         bot.handle("投递")
         bot.handle("投递 10")
+        bot.handle("投递 大模型算法 Agent")
+        bot.handle("投递 大模型算法、Agent 10")
+        bot.handle("投递 abc")
         bot.handle("演练")
         bot.handle("演练 3")
-        bot.handle("投递 abc")
+        bot.handle("搜索 推荐算法")
         check("指令参数解析", calls,
-              [(True, None), (True, 10), (False, 5), (False, 3), (True, None)])
+              [(True, None, None), (True, 10, None),
+               (True, None, ["大模型算法", "Agent"]),
+               (True, 10, ["大模型算法", "Agent"]),
+               (True, None, ["abc"]),
+               (False, 5, None), (False, 3, None),
+               (True, None, ["推荐算法"])])
         check_true("未知指令有提示", "不认识" in bot.handle("吃饭"))
         check_true("空闲时停止", "没有任务" in bot.handle("停止"))
         check_true("空闲状态", "空闲" in bot.handle("状态"))
+
+
+def test_bot_keywords_set_and_clear():
+    with tempfile.TemporaryDirectory() as tmp:
+        bot = make_bot(tmp)
+        reply = bot.handle("关键词 大模型算法、Agent RAG")
+        check_true("设定成功", "3 个" in reply)
+        check("写进关键词文件", bot.pending_keywords(), ["大模型算法", "Agent", "RAG"])
+        plan = bot.handle("关键词")
+        check_true("查看时列出关键词", "大模型算法" in plan and "QQ 指定" in plan)
+        check_true("状态里提示已设定", "已设定 3 个关键词" in bot.handle("状态"))
+        check_true("清空回复", "已清空" in bot.handle("关键词 清空"))
+        check("文件被删掉", bot.keywords_path.exists(), False)
+        check("恢复成 config 的关键词", bot.pending_keywords(), [])
+
+
+def test_bot_start_passes_keywords_to_greet():
+    with tempfile.TemporaryDirectory() as tmp:
+        bot = make_bot(tmp)
+        captured: dict = {}
+
+        class Proc:
+            pid = 4321
+            returncode = None
+
+            def poll(self):
+                return None
+
+        def fake_popen(argv, **kw):
+            captured["argv"] = list(argv)
+            return Proc()
+
+        bot.popen = fake_popen
+        bot._watch = lambda proc: None      # 别起后台线程
+        bot._set_pending(["大模型算法", "Agent"])
+        reply = bot.start(live=True, limit=10)
+        argv = captured["argv"]
+        check_true("子进程带上了 --keywords", "--keywords" in argv)
+        check("关键词用竖线连接",
+              argv[argv.index("--keywords") + 1] if "--keywords" in argv else None,
+              "大模型算法|Agent")
+        check_true("实发走 --auto", "--auto" in argv)
+        check_true("回复里有条数", "最多 10 条" in reply)
+        check_true("回复里有关键词数", "2 个关键词" in reply)
+
+        # 指令里直接带关键词时，优先于「/关键词」设下的那组
+        bot.proc = None
+        bot.start(live=False, limit=None, keywords=["推荐算法"])
+        argv = captured["argv"]
+        check("指令关键词优先",
+              argv[argv.index("--keywords") + 1] if "--keywords" in argv else None,
+              "推荐算法")
+        check_true("演练走 --dry", "--dry" in argv)
 
 
 def test_bot_today_lists_sent_jobs():
@@ -363,6 +471,7 @@ def make_launcher(snowluma_up: bool, qq_up: bool, auto_launch: bool = True):
     cfg = cfgmod.load()
     cfg._raw["qq"] = {"auto_launch": auto_launch, "qq_path": sys.executable}
     launcher = QQLauncher(cfg)
+    launcher.console_log_path = None        # 测试别在真实 SnowLuma/logs 里建文件
     calls: list[list[str]] = []
     launcher.popen = lambda argv, **kw: calls.append(list(argv))
     launcher.port_open = lambda port: snowluma_up
@@ -398,8 +507,11 @@ def test_launcher_skips_running_or_disabled():
 
 if __name__ == "__main__":
     for fn in (test_notifier_sends_private_msg, test_notifier_disabled_or_down_is_harmless,
+               test_notifier_flushes_outbox_when_back_online,
+               test_notifier_queues_when_onebot_reports_failure,
                test_agent_notifies_each_sent_job, test_agent_stops_on_remote_flag,
                test_bot_only_obeys_owner_private_chat, test_bot_command_parsing,
+               test_bot_keywords_set_and_clear, test_bot_start_passes_keywords_to_greet,
                test_bot_today_lists_sent_jobs, test_lock_is_exclusive_and_freed_on_kill,
                test_greet_refused_while_browser_busy, test_bot_sees_task_started_elsewhere,
                test_launcher_starts_whats_missing, test_launcher_skips_running_or_disabled,

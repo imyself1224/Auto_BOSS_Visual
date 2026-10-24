@@ -26,6 +26,10 @@ def check(name, got, want):
         FAILED.append(f"{name}: 得到 {got!r}，期望 {want!r}")
 
 
+def check_true(name, cond):
+    check(name, bool(cond), True)
+
+
 class FakeStore:
     def close(self):
         pass
@@ -54,6 +58,17 @@ def drive(outcomes: list[str]) -> tuple[int, int]:
     run.build = lambda cfg, run_id: (None, FakeStore(), None, None)
     run.GreetAgent = FakeAgent
     run.time.sleep = lambda s: None
+
+    # ★ 测试绝不能真的给大号发 QQ ★
+    # 真实配置里 [qq].enabled=true、.env 里也有 OWNER_QQ，不挡住的话每跑一次测试
+    # 大号就会收到一串「任务结束」。
+    class QuietNotifier:
+        enabled = False
+
+        def send(self, text):
+            return False
+
+    run.Notifier = lambda cfg: QuietNotifier()
     args = SimpleNamespace(limit=None)
     with redirect_stdout(io.StringIO()):
         code = run._greet_auto(run.cfgmod.load(), args, max_restarts=3, wait_sec=0)
@@ -84,9 +99,54 @@ def test_gives_up_after_max_restarts():
     check("放弃时返回非 0", code, 1)
 
 
+def test_start_notice_lists_keywords():
+    """任务开始前推给 QQ 的文字里要能看出这次搜哪些词。"""
+    import run as run_mod
+    from autoboss import config as cfgmod
+    cfg = cfgmod.load()
+    cfg._raw["search"] = {"queries": ["大模型算法", "Agent"], "query": "算法工程师"}
+    cfg._raw["source"] = {"mode": "both", "recommend_last": True, "expect_tabs": []}
+
+    text = run_mod._start_notice(cfg, [], dry_run=False, limit=5)
+    check_true("标题是实发", "投递任务开始" in text and "实发" in text)
+    check_true("带上本次条数", "最多 5 条" in text)
+    check_true("列出关键词", "大模型算法" in text and "Agent" in text)
+    check_true("带上关键词个数", "2 个" in text)
+    check_true("提到推荐流", "推荐流" in text)
+
+    text = run_mod._start_notice(cfg, ["推荐算法"], dry_run=True, limit=None)
+    check_true("标明来自 QQ 指令", "来自 QQ 指令" in text)
+    check_true("只列指定的词", "推荐算法" in text and "Agent" not in text)
+    check_true("指定关键词时不走推荐流", "推荐流" not in text)
+    check_true("标明演练", "演练" in text)
+
+
+def test_notify_start_sends_to_qq():
+    class Rec:
+        enabled = True
+
+        def __init__(self):
+            self.sent = []
+
+        def send(self, text):
+            self.sent.append(text)
+
+    import run as run_mod
+    from autoboss import config as cfgmod
+    cfg = cfgmod.load()
+    cfg._raw["search"] = {"queries": ["大模型算法"], "query": ""}
+    cfg._raw["source"] = {"mode": "search", "recommend_last": True}
+    rec = Rec()
+    with redirect_stdout(io.StringIO()):
+        run_mod._notify_start(rec, cfg, [], dry_run=True, limit=None)
+    check("开始前推 1 条", len(rec.sent), 1)
+    check_true("推的是关键词清单", rec.sent and "大模型算法" in rec.sent[0])
+
+
 if __name__ == "__main__":
     for fn in (test_restarts_until_quota, test_captcha_not_restarted, test_dry_pool_not_restarted,
-               test_gives_up_after_max_restarts):
+               test_gives_up_after_max_restarts, test_start_notice_lists_keywords,
+               test_notify_start_sends_to_qq):
         try:
             fn()
         except Exception as exc:  # noqa: BLE001

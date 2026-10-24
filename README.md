@@ -7,7 +7,7 @@
 - 🎯 **按简历判档**：你提供一份「求职者画像」，模型把每个岗位跟它对比，分成 最匹配 / 次匹配 / 可转投 / 产品 / 测试 / 不可用，按档位先后投递。
 - 🧮 **硬条件过滤**：只投实习、日薪下限、城市、地区加分，薪资统一折算成日薪再比。
 - 🛑 **安全阀**：默认演练不发送；验证码 / 平台额度提示立即停机；去重库保证不重复打扰。
-- 📱 **QQ 遥控（可选）**：小号推送每条投递结果，大号发 `/投递`、`/停止` 远程控制。
+- 📱 **QQ 遥控（可选）**：小号推送每条投递结果和本次检索关键词，大号发 `/投递`、`/投递 关键词`、`/停止` 远程控制。
 - 📦 **只依赖一个 `websockets`**，其余全是 Python 标准库。
 
 ---
@@ -79,6 +79,7 @@ python run.py greet --limit 1                 # ③ 演练一条：看筛选和�
 python run.py greet --live --limit 1 --yes    # ④ 真发一条，盯着浏览器确认
 python run.py greet --live --yes              # ⑤ 按额度连续跑
 python run.py greet --auto                    # ⑥ 无人值守：投到平台额度用完，出错自动重启
+python run.py greet --keywords "大模型算法 Agent"  # 只搜这几个词（不用改 config）
 python run.py stats                           # 看历史记录
 ```
 
@@ -269,6 +270,19 @@ city     = "101010100"                    # 北京
 推荐流加了实习筛选后通常只有二三十个岗位，想投到平台每日额度必须靠关键词搜索补量。
 每个来源翻到页脚就换下一个，搜到的岗位照样过全部筛选。
 
+一个关键词连续几屏都是**新岗位却一个都不能投**时，只跳过这个词、换下一个，
+不会因此结束整轮任务；连续 `limits.max_dry_sources` 个来源都没投出去才收工
+（默认 `0` = 把所有关键词走完）。
+
+**临时只搜指定的关键词**（不用改配置）：
+
+- QQ：`/投递 大模型算法 Agent`（实发）、`/演练 大模型算法`（演练）；
+  或先 `/关键词 大模型算法 Agent` 设成默认，之后 `/投递` 只搜这几个词，
+  `/关键词 清空` 恢复 config。
+- 命令行：`python run.py greet --keywords "大模型算法 Agent" --live`。
+
+指定关键词时**只搜这些词**，不掺推荐流。任务开始前会先推一条关键词清单。
+
 ### 筛选规则 `[job_filter]`
 
 **第 0 层：BOSS 自带筛选器**（`boss_filters = [["求职类型", "实习"]]`）——先把池子换对，不能省。
@@ -315,7 +329,8 @@ prefer_district_bonus = 1.0
 | `limits.daily_cap` | `200` | 本地兜底上限；真实额度以平台提示为准（约 150/天） |
 | `limits.min_interval_sec` / `max_interval_sec` | `25` / `60` | 两次打招呼间隔（三角分布随机） |
 | `limits.max_empty_scans` | `6` | 单个来源连续几屏挑不出岗位就换下一个 |
-| `limits.max_dry_scans` | `8` | 整个任务连续几屏都没有可投的就收工 |
+| `limits.max_dry_scans` | `8` | 单个关键词连续几屏都是新岗位却都不能投，就跳过这个词 |
+| `limits.max_dry_sources` | `0` | 连续几个来源一条都投不出去才收工；`0` = 全部走完 |
 | `limits.active_hours` | `[0, 24]` | 运行时段；建议收紧到 `[9, 21]`，凌晨批量操作最容易被标记 |
 
 另外：按「职位标题 + 公司」去重，同一职位绝不重复打扰；读不全职位名的卡片直接跳过；
@@ -368,9 +383,21 @@ schtasks /Create /TN auto_boss /SC DAILY /ST 09:05 /TR "C:\path\to\Auto_BOSS_Vis
    QQ 安装路径不同的改 `qq_path`。
 6. 再运行 `python run.py bot`，大号会收到「已上线」。
 
-`run.py bot` 启动时会自动拉起 SnowLuma 和 QQ（`[qq].auto_launch`）。想开机自启，
-在「启动」文件夹（Win+R → `shell:startup`）里放一个 bat，内容为
-`start "auto_boss bot" /min cmd /c "C:\path\to\Auto_BOSS_Visual\start_bot.bat"`。
+`run.py bot` 启动时会自动拉起 SnowLuma 和 QQ（`[qq].auto_launch`），两者都不建窗口。
+想开机自启又不想任务栏里挂黑窗口，在「启动」文件夹（Win+R → `shell:startup`）里放一个
+`auto_boss_bot.vbs`：
+
+```vbs
+Set sh = CreateObject("WScript.Shell")
+sh.CurrentDirectory = "D:\tools\auto_boss"
+d = Year(Date) & Right("0" & Month(Date), 2) & Right("0" & Day(Date), 2)
+sh.Run "cmd /c start_bot.bat >> logs\bot_" & d & ".log 2>&1 <nul", 0, False
+```
+
+窗口样式 `0` = 隐藏；`<nul` 让 `start_bot.bat` 末尾的 `pause` 不会傻等。
+bot 和 SnowLuma 的输出分别落在 `logs/bot_*.log` 和 `SnowLuma/logs/`。
+bot 出现未预期异常时会自动把最近日志推给大号；**断网时发不出去的通知会存进
+`logs/qq_outbox/`，恢复连接后自动补发**。
 
 **指令（大号私聊小号，以 `/` 开头）：**
 
@@ -378,7 +405,13 @@ schtasks /Create /TN auto_boss /SC DAILY /ST 09:05 /TR "C:\path\to\Auto_BOSS_Vis
 |---|---|
 | `/投递` | 实发，投到平台额度用完（= `greet --auto`） |
 | `/投递 10` | 实发，本次最多 10 条 |
+| `/投递 大模型算法 Agent` | 实发，**只搜**这几个关键词（不走推荐流） |
+| `/搜索 关键词` | 同 `/投递 关键词` |
 | `/演练 5` | 只筛选不发送，最多 5 条 |
+| `/演练 大模型算法` | 只搜这几个关键词，演练 |
+| `/关键词` | 看当前检索关键词（config 的或 QQ 指定的） |
+| `/关键词 大模型算法 Agent` | 设定下次任务的检索关键词，之后一直沿用 |
+| `/关键词 清空` | 恢复 config.toml 的 `[search].queries` |
 | `/停止` | 当前这条处理完就收尾；150 秒没退出就强制结束 |
 | `/状态` | 是否在跑、跑了多久、今日已投多少 |
 | `/今日` | 今天投了哪些岗位 |
@@ -390,6 +423,8 @@ schtasks /Create /TN auto_boss /SC DAILY /ST 09:05 /TR "C:\path\to\Auto_BOSS_Vis
 
 - 只认大号私聊里以 `/` 开头的消息，其他一律不理。
 - `/投递` 是实发，**不再二次确认**。
+- 每次任务开始前会先推一条「本次检索关键词」（实发/演练、条数、是否走推荐流都在里面）；
+  命令行、bat 跑 `greet` 时也会推。关键词之间用空格、逗号、顿号或竖线分隔都行。
 - 推送不依赖 bot 进程：只要 `[qq].enabled = true` 且填了 `OWNER_QQ`，命令行 / bat 跑 `greet` 也会推送；SnowLuma 没开时投递照常进行。
 - bat、命令行、QQ 三个入口共用一把操作系统文件锁，**同一时间只有一个任务操作浏览器**。
 
@@ -437,6 +472,7 @@ Auto_BOSS_Visual/
 │   ├── humanize.py         贝塞尔鼠标轨迹、三角分布间隔
 │   ├── store.py            SQLite 去重 + 审计
 │   ├── lock.py             单任务文件锁
+│   ├── keywords.py         关键词解析 / 来源编排（agent、QQ、CLI 共用）
 │   ├── qq.py / qqbot.py    OneBot 推送 / QQ 遥控
 │   ├── qqlaunch.py         自动拉起 SnowLuma 和 QQ
 │   └── config.py           配置加载（tomllib + .env 解析）
@@ -452,7 +488,8 @@ Auto_BOSS_Visual/
 
 每个职位约 6 次模型调用、约 1 万 token（单张截图封顶约 1024 token）。按每天 100 条算是百万 token 量级，
 单价见 [DeepSeek 定价页](https://api-docs.deepseek.com/quick_start/pricing)。
-想省钱：减少 `queries`、调小 `max_empty_scans`、保持 `deepseek.thinking = false`。
+想省钱：减少 `queries`、调小 `max_empty_scans` / `max_dry_scans`、
+把 `max_dry_sources` 设成 10~15（不必把所有关键词走完）、保持 `deepseek.thinking = false`。
 
 ## 免责声明
 

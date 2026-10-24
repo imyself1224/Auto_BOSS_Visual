@@ -8,6 +8,7 @@
     python run.py greet --limit 3 # 本次最多发 3 条
     python run.py greet --auto    # 无人值守：实发、不确认、出错自动重启，投到平台额度用完
     python run.py greet --dry     # 强制演练（覆盖配置，QQ「演练」指令用它）
+    python run.py greet --keywords "大模型算法 Agent"  # 只搜这几个词（QQ 指令也用它）
     python run.py stats           # 看历史记录
     python run.py bot             # QQ 机器人：推送投递结果、接收大号的遥控指令
 """
@@ -23,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from autoboss import config as cfgmod
+from autoboss import keywords as kwlib
 from autoboss import prompts
 from autoboss.agent import GreetAgent
 from autoboss.browser import BrowserSession
@@ -83,7 +85,10 @@ def cmd_doctor(cfg, args):
 
     # 1) 配置
     print("\n[1/5] 配置")
-    print(f"  关键词      {cfg.get('search.query')}")
+    plan = kwlib.planned_sources(cfg)
+    picked = kwlib.queries_of(plan)
+    shown = "、".join(picked[:6]) + ("…" if len(picked) > 6 else "")
+    print(f"  关键词      {len(picked)} 个：{shown or '（无）'}")
     print(f"  城市        {cfg.get('search.city')}")
     print(f"  视觉模型    {cfg.get('deepseek.vision_model')}")
     print(f"  今日上限    {cfg.get('limits.daily_cap')}")
@@ -238,14 +243,26 @@ def _start_log() -> Path:
 _FINAL_KINDS = {"done", "quota", "dry", "captcha", "login", "stop", "interrupt"}
 
 _KIND_TEXT = {"done": "所有来源都走完了", "quota": "额度已满",
-              "dry": "连续好几屏都没有可投的岗位，先停下，过段时间再投",
+              "dry": "连续好几个来源都没有可投的岗位，先停下，过段时间再投",
               "captcha": "出现验证码，请人工处理后重跑",
               "login": "需要扫码登录：先运行 python run.py login",
               "stop": "按规则停机（见日志）", "interrupt": "已中断",
               "error": "异常退出（见日志）"}
 
 
-def _notify_end(notifier, cfg, kind: str, stats: dict, dry_run: bool, why: str = ""):
+def _tail_of(path: Path | None, lines: int = 25, limit: int = 1500) -> str:
+    """日志末尾几行，用来随错误通知一起发出去。"""
+    if path is None:
+        return ""
+    try:
+        with Path(path).open("r", encoding="utf-8", errors="replace") as fh:
+            return "".join(fh.readlines()[-lines:]).strip()[-limit:]
+    except OSError:
+        return ""
+
+
+def _notify_end(notifier, cfg, kind: str, stats: dict, dry_run: bool,
+                why: str = "", log_path: Path | None = None):
     """一次投递任务结束时推一条总结。--auto 中途重启不算结束。"""
     if not notifier.enabled:
         return
@@ -264,17 +281,62 @@ def _notify_end(notifier, cfg, kind: str, stats: dict, dry_run: bool, why: str =
     head = "演练" if dry_run else "投递"
     count = (f"演练 {stats.get('dry_run', 0)}" if dry_run
              else f"发出 {stats.get('sent', 0)}")
-    notifier.send(f"{icon} {head}任务结束：{_KIND_TEXT.get(kind, kind)}\n"
-                  f"{count} · 失败 {stats.get('failed', 0)} · "
-                  f"过滤 {stats.get('filtered', 0)}\n今日累计已投 {today} 条"
-                  + (f"\n过滤原因：{why}" if why else ""))
+    msg = (f"{icon} {head}任务结束：{_KIND_TEXT.get(kind, kind)}\n"
+           f"{count} · 失败 {stats.get('failed', 0)} · "
+           f"过滤 {stats.get('filtered', 0)}\n今日累计已投 {today} 条"
+           + (f"\n过滤原因：{why}" if why else ""))
+    # 异常退出时把日志尾巴一起发过去：大号上直接能看原因。
+    # 断网发不出去也没关系，Notifier 会存进 logs/qq_outbox，连上再补发。
+    if kind == "error":
+        tail = _tail_of(log_path)
+        if tail:
+            msg += "\n\n--- 最近日志 ---\n" + tail
+    notifier.send(msg)
+
+
+def _start_notice(cfg, keywords, dry_run: bool, limit: int | None) -> str:
+    """任务开始前推给 QQ 的文字：这次到底搜哪些关键词。
+
+    以前只有结束通知，开始时不说话 —— 搜「大模型算法」两屏就停的那次，
+    人在 QQ 上完全看不出它到底试过哪些词（日志里才有）。
+    """
+    plan = kwlib.planned_sources(cfg, keywords)
+    picked = kwlib.queries_of(plan)
+    extra = [kwlib.label(kind, q) for kind, q in plan if kind != "search"]
+
+    head = ("▶️ 演练任务开始（只筛选，不发送）" if dry_run
+            else "▶️ 投递任务开始（实发）")
+    if limit:
+        head += f"，本次最多 {limit} 条"
+    lines = [head]
+    if picked:
+        src = "，来自 QQ 指令" if keywords else "（config.toml）"
+        lines.append(f"🔎 本次检索关键词 {len(picked)} 个{src}：")
+        lines.append(kwlib.block(picked))
+    else:
+        lines.append("🔎 没有配置检索关键词，只走推荐流")
+    if extra:
+        lines.append("另外还会走：" + " → ".join(extra))
+    return "\n".join(lines)
+
+
+def _notify_start(notifier, cfg, keywords, dry_run: bool, limit: int | None):
+    text = _start_notice(cfg, keywords, dry_run, limit)
+    print("\n" + text + "\n")
+    if notifier.enabled:
+        notifier.send(text)
 
 
 def cmd_greet(cfg, args):
     log_path = _start_log()
     print(f"[log] 本次输出同时写入 {log_path}")
+
+    # QQ 指令 / --keywords 指定的关键词：只搜这些，覆盖 config 的 [search].queries
+    words = kwlib.split_keywords(getattr(args, "keywords", "") or "")
+    notifier = Notifier(cfg)
     if args.auto:
-        return _greet_auto(cfg, args)
+        _notify_start(notifier, cfg, words, dry_run=False, limit=args.limit)
+        return _greet_auto(cfg, args, log_path, keywords=words)
 
     live = args.live and not args.dry
     if live:
@@ -289,25 +351,31 @@ def cmd_greet(cfg, args):
                 print("  已取消。")
                 return 1
 
+    # 这里必须显式算出 True/False，不能把 None 传下去：
+    # GreetAgent 里 dry_run=None 表示"读配置"，而配置默认 dry_run=true，
+    # 于是 --live 会静默退化成演练模式（以前踩过）。算一次，通知和 agent 共用。
+    dry = True if args.dry else (False if live else bool(cfg.get("safety.dry_run", True)))
+    # 开始通知放在 build() 之前：API key 配错、浏览器起不来时，
+    # 大号也能先在 QQ 上看到"这次要搜哪些词"，再收到失败总结。
+    _notify_start(notifier, cfg, words, dry_run=dry, limit=args.limit)
+
     run_id = new_run_id()
     client, store, vision, session = build(cfg, run_id)
-    # 注意这里必须是 False 而不是 None：
-    # GreetAgent 里 dry_run=None 表示"读配置"，而配置默认 dry_run=true，
-    # 所以传 None 会让 --live 静默退化成演练模式。
-    notifier = Notifier(cfg)
-    dry = True if args.dry else (False if live else None)
     agent = GreetAgent(cfg, client, session, store, vision,
-                       limit=args.limit, dry_run=dry, notifier=notifier)
+                       limit=args.limit, dry_run=dry, notifier=notifier,
+                       keywords=words)
     try:
         agent.run()
     finally:
         store.close()
         _notify_end(notifier, cfg, agent.stop_kind or "error", agent.stats, agent.dry_run,
-                    agent.filter_summary())
+                    agent.filter_summary(), log_path)
     return 0
 
 
-def _greet_auto(cfg, args, max_restarts: int = 5, wait_sec: float = 60.0):
+def _greet_auto(cfg, args, log_path: Path | None = None,
+                max_restarts: int = 5, wait_sec: float = 60.0,
+                keywords: list[str] | None = None):
     """无人值守：实发，出错就等一会儿重启，直到额度用完 / 来源走完 / 需要人工。
 
     重启是安全的：已发的、已沟通过的都在去重库里，不会重复打招呼；
@@ -316,6 +384,10 @@ def _greet_auto(cfg, args, max_restarts: int = 5, wait_sec: float = 60.0):
     restarts = 0
     totals = {"sent": 0, "failed": 0, "filtered": 0}
     limit = args.limit
+    # 关键词在整个 --auto 任务里固定：每轮重建 agent 时都传同一份，
+    # 中途改了 config.toml 的 queries 也只影响下一次任务（自动重启不算新任务）。
+    words = (keywords if keywords is not None
+             else kwlib.split_keywords(getattr(args, "keywords", "") or ""))
     while True:
         print(f"\n[auto] 第 {restarts + 1} 轮开始（{datetime.now():%H:%M:%S}）")
         cfg = cfgmod.load()        # 每轮重读配置，中途改了 config.toml 也能生效
@@ -327,7 +399,8 @@ def _greet_auto(cfg, args, max_restarts: int = 5, wait_sec: float = 60.0):
             run_id = new_run_id()
             client, store, vision, session = build(cfg, run_id)
             agent = GreetAgent(cfg, client, session, store, vision,
-                               limit=limit, dry_run=False, notifier=notifier)
+                               limit=limit, dry_run=False, notifier=notifier,
+                               keywords=words)
             agent.run()
             kind = agent.stop_kind or "done"
         except KeyboardInterrupt:
@@ -345,7 +418,7 @@ def _greet_auto(cfg, args, max_restarts: int = 5, wait_sec: float = 60.0):
         if kind in _FINAL_KINDS:
             print(f"\n[auto] 结束：{_KIND_TEXT[kind]}")
             _notify_end(notifier, cfg, kind, totals, False,
-                        agent.filter_summary() if agent is not None else "")
+                        agent.filter_summary() if agent is not None else "", log_path)
             return 0 if kind in ("done", "quota", "dry") else 1
 
         # --limit 是整个任务的上限，重启后只投剩下的
@@ -353,17 +426,17 @@ def _greet_auto(cfg, args, max_restarts: int = 5, wait_sec: float = 60.0):
             limit = args.limit - totals["sent"]
             if limit <= 0:
                 print(f"\n[auto] 结束：已投满 {args.limit} 条")
-                _notify_end(notifier, cfg, "quota", totals, False)
+                _notify_end(notifier, cfg, "quota", totals, False, log_path=log_path)
                 return 0
 
         restarts += 1
         if cfg.stop_flag.exists():
             print("\n[auto] 收到 QQ 停止指令，不再重启")
-            _notify_end(notifier, cfg, "stop", totals, False)
+            _notify_end(notifier, cfg, "stop", totals, False, log_path=log_path)
             return 1
         if restarts > max_restarts:
             print(f"\n[auto] 连续出错 {max_restarts} 次，放弃。看日志排查。")
-            _notify_end(notifier, cfg, "error", totals, False)
+            _notify_end(notifier, cfg, "error", totals, False, log_path=log_path)
             return 1
         print(f"[auto] {wait_sec:.0f} 秒后自动重启（第 {restarts}/{max_restarts} 次）…")
         notifier.send(f"⚠️ 这一轮异常退出，{wait_sec:.0f} 秒后自动重启"
@@ -418,7 +491,12 @@ def cmd_stats(cfg, args):
 # ===========================================================================
 def cmd_bot(cfg, args):
     from autoboss.qqbot import QQBot
-    return QQBot(cfg, Path(__file__).resolve()).run()
+    bot = QQBot(cfg, Path(__file__).resolve())
+    try:
+        return bot.run()
+    except Exception as exc:  # noqa: BLE001 —— 隐藏窗口里没人看得到栈，推到 QQ 上
+        bot.report_crash(exc)
+        return 1
 
 
 # ===========================================================================
@@ -444,6 +522,9 @@ def main():
 
     p_greet.add_argument("--dry", action="store_true",
                          help="强制演练（覆盖 config 里的 dry_run，优先于 --live）")
+    p_greet.add_argument("--keywords", default="", metavar="关键词",
+                         help="只搜这些关键词（空格 / 逗号 / 顿号分隔），"
+                              "覆盖 config 的 [search].queries，且不再走推荐流")
 
     sub.add_parser("stats", help="查看历史记录")
 

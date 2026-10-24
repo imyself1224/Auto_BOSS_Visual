@@ -22,28 +22,38 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 
 from websockets.exceptions import ConnectionClosed
 
+from . import config as cfgmod
+from . import keywords as kw
 from .lock import BrowserLock
 from .qq import Notifier, OneBot
 from .qqlaunch import QQLauncher
 
 HELP = """🤖 auto_boss 指令（以 / 开头）
-/投递          实发，投到平台额度用完
-/投递 10       实发，本次最多 10 条
-/演练 5        只筛选不发送，最多 5 条（默认 5）
-/停止          让正在跑的任务收尾退出
-/状态          是否在跑、今日已投多少
-/今日          今天投了哪些岗位
-/统计          今日各状态计数 + 最近几次运行
-/日志 [20]     最近一份运行日志的末尾几行
-/重启          重启电脑（60 秒后执行）
-/关机          关闭电脑（60 秒后执行）
-/取消          撤销还没执行的重启 / 关机
-/帮助          显示本说明"""
+/投递                实发，投到平台额度用完，关键词用 config.toml 的
+/投递 10             实发，本次最多 10 条
+/投递 大模型算法 Agent  实发，**只搜**这几个关键词（空格/逗号/顿号分隔）
+/搜索 关键词          同「/投递 关键词」
+/演练 [关键词...] [5]  只筛选不发送（默认 5 条）
+/关键词              看当前检索关键词
+/关键词 大模型算法 Agent  设定下次任务的检索关键词（会一直沿用）
+/关键词 清空          恢复用 config.toml 里的 [search].queries
+/停止                让正在跑的任务收尾退出
+/状态                是否在跑、今日已投多少
+/今日                今天投了哪些岗位
+/统计                今日各状态计数 + 最近几次运行
+/日志 [20]           最近一份运行日志的末尾几行
+/重启                重启电脑（60 秒后执行）
+/关机                关闭电脑（60 秒后执行）
+/取消                撤销还没执行的重启 / 关机
+/帮助                显示本说明
+
+每次任务开始前会把本次要搜的关键词单独推给你。"""
 
 def cq_unescape(text: str) -> str:
     """raw_message 是 CQ 码字符串，[ ] , & 会被转义成 &#91; 之类，还原成原字符。"""
@@ -71,6 +81,8 @@ class QQBot:
         self.owner = self.notifier.owner
         self.bot: OneBot | None = None
         self.lock = BrowserLock(cfg.lock_path)
+        # 「/关键词 ...」设下来、下次任务沿用的关键词（一行一个）
+        self.keywords_path = cfg.qq_keywords_path
         # 起子进程的入口。测试里换成桩，保证测试永远不会真的起一个实发任务
         self.popen = subprocess.Popen
         # 执行 shutdown 命令的入口。测试里换成桩，保证测试永远不会真的关机
@@ -81,6 +93,8 @@ class QQBot:
         self.task_desc = ""
         self.task_started = 0.0
         self._stop_deadline = 0.0
+        self._last_report = 0.0
+        self._last_disconnect_report = 0.0
 
     # ------------------------------------------------------------------
     def run(self) -> int:
@@ -92,12 +106,16 @@ class QQBot:
         print(f"连接 OneBot：{self.notifier.ws_url}，只接受 QQ {self.owner} 的私聊指令")
         backoff = 3.0
         first = True
+        failures = 0
         while True:
             try:
                 with OneBot(self.notifier.ws_url, self.notifier.token) as bot:
                     self.bot = bot
                     backoff = 3.0
+                    failures = 0
                     print(f"[{datetime.now():%H:%M:%S}] 已连接")
+                    # 断网期间没发出去的通知，连上先补发
+                    self.notifier.flush()
                     if first:
                         self.reply("🤖 auto_boss 已上线，发「/帮助」查看指令")
                         first = False
@@ -110,12 +128,59 @@ class QQBot:
                           "要停可以重开 bot 后发「/停止」。")
                 return 0
             except (OSError, TimeoutError, ConnectionClosed) as exc:
+                failures += 1
                 print(f"[{datetime.now():%H:%M:%S}] 连接断开（{type(exc).__name__}: {exc}），"
                       f"{backoff:.0f}s 后重连")
+                if failures >= 10:
+                    self.report_disconnect(exc, failures)
+            except Exception as exc:  # noqa: BLE001
+                # 开机自启是隐藏窗口，没人看得到栈 —— 推到 QQ 上（断网时排队）
+                self.report_crash(exc)
             finally:
                 self.bot = None
             time.sleep(backoff)
             backoff = min(backoff * 2, 60.0)
+
+    def report_crash(self, exc: BaseException) -> None:
+        """把异常和最近日志推给大号。断网时 Notifier 会先存进 outbox，连上后补发。"""
+        print(f"[{datetime.now():%H:%M:%S}] bot 出错：{type(exc).__name__}: {exc}")
+        tb = traceback.format_exc().strip()
+        if tb and not tb.endswith("NoneType: None"):
+            print(tb)
+        # 同一类错误别刷屏：10 分钟内只推第一条
+        now = time.time()
+        if now - self._last_report < 600:
+            return
+        self._last_report = now
+        head = f"❌ auto_boss bot 出错：{type(exc).__name__}: {exc}"
+        tail = self._log_tail(30)
+        body = f"{head}\n\n最近日志：\n{tail}" if tail else (f"{head}\n\n{tb}" if tb else head)
+        # QQ 单条消息太长会被吞，截断
+        self.notifier.send(body[-1800:])
+
+    def report_disconnect(self, exc: BaseException, failures: int) -> None:
+        """连续多次连不上 OneBot：推一条带日志尾巴的提醒。
+
+        半小时最多推一条；断网时 OneBot 也连不上，消息会进 outbox 等恢复。
+        """
+        now = time.time()
+        if now - self._last_disconnect_report < 1800:
+            return
+        self._last_disconnect_report = now
+        head = (f"⚠️ auto_boss 已经连续 {failures} 次连不上 QQ/OneBot："
+                f"{type(exc).__name__}: {exc}")
+        tail = self._log_tail(20)
+        body = f"{head}\n\n最近日志：\n{tail}" if tail else head
+        self.notifier.send(body[-1800:])
+
+    def _log_tail(self, lines: int = 30) -> str:
+        """开机自启时 stdout 被重定向到 logs/bot_YYYYMMDD.log，取最后几行。"""
+        path = self.root / "logs" / f"bot_{datetime.now():%Y%m%d}.log"
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                return "".join(fh.readlines()[-lines:]).strip()
+        except OSError:
+            return ""
 
     def reply(self, text: str):
         if self.bot is not None:
@@ -148,10 +213,14 @@ class QQBot:
 
         if cmd in ("帮助", "help", "菜单", "?", "？"):
             return HELP
-        if cmd in ("投递", "开始", "start"):
-            return self.start(live=True, limit=self._int(arg, None))
+        if cmd in ("投递", "开始", "start", "搜索", "search"):
+            words, limit = self._words_and_limit(rest)
+            return self.start(live=True, limit=limit, keywords=words or None)
         if cmd in ("演练", "dry"):
-            return self.start(live=False, limit=self._int(arg, 5))
+            words, limit = self._words_and_limit(rest)
+            return self.start(live=False, limit=limit or 5, keywords=words or None)
+        if cmd in ("关键词", "检索词", "keywords", "kw"):
+            return self.keyword_cmd(" ".join(rest))
         if cmd in ("停止", "stop"):
             return self.stop()
         if cmd in ("状态", "status"):
@@ -212,6 +281,88 @@ class QQBot:
             return default
 
     # ------------------------------------------------------------------
+    #  检索关键词
+    # ------------------------------------------------------------------
+    def _words_and_limit(self, rest: list[str]):
+        """把「大模型算法 10」拆成 (关键词列表, 条数)。
+
+        关键词之间用空格、逗号、顿号、竖线都行；纯数字当条数（多个数字取最后一个）。
+        「/投递 大模型算法 10」= 只搜大模型算法、最多 10 条。
+        """
+        words: list[str] = []
+        limit = None
+        for token in rest:
+            for piece in kw.SPLIT_RE.split(token):
+                piece = piece.strip()
+                if not piece:
+                    continue
+                if piece.isdigit():
+                    # 纯数字是条数；「0」当没写，别把它当成关键词去搜
+                    if int(piece) > 0:
+                        limit = int(piece)
+                    continue
+                words.append(piece)
+        return kw.normalize(words), limit
+
+    # 「/关键词 清空」等恢复 config 的写法
+    _CLEAR_WORDS = ("清空", "清除", "默认", "重置", "恢复", "clear", "reset", "default")
+
+    def pending_keywords(self) -> list[str]:
+        """QQ 上设定、下次任务沿用的关键词；没设过就是空列表。"""
+        try:
+            text = self.keywords_path.read_text(encoding="utf-8")
+        except OSError:
+            return []
+        return kw.normalize(text.splitlines())
+
+    def _set_pending(self, words: list[str]) -> None:
+        if not words:
+            self.keywords_path.unlink(missing_ok=True)
+            return
+        self.keywords_path.parent.mkdir(parents=True, exist_ok=True)
+        self.keywords_path.write_text("\n".join(words) + "\n", encoding="utf-8")
+
+    def keyword_cmd(self, raw: str) -> str:
+        """「/关键词 [关键词...]」：不带参数 = 查看，带了 = 设定，清空 = 恢复 config。"""
+        words = kw.split_keywords(raw)
+        if not words:
+            return self.plan_text()
+        if words[0].lower() in self._CLEAR_WORDS:
+            self._set_pending([])
+            return ("✅ 已清空 QQ 指定的关键词，之后的任务用 config.toml 的 "
+                    "[search].queries\n\n" + self.plan_text())
+        self._set_pending(words)
+        return (f"✅ 已设定 {len(words)} 个检索关键词，下次「/投递」「/演练」生效：\n"
+                + kw.block(words)
+                + "\n发「/关键词」查看，「/关键词 清空」恢复 config.toml")
+
+    def plan_text(self) -> str:
+        """当前会搜哪些关键词 —— 「/关键词」的回复，也是任务开始推送的同一份编排。"""
+        pending = self.pending_keywords()
+        cfg = self.cfg
+        try:
+            # bot 可能已经常驻好几天，config.toml 改完要能立即反映出来；
+            # 读坏了（正在编辑、文件暂时不在）就退回启动时那份。
+            cfg = cfgmod.load()
+        except (Exception, SystemExit):  # noqa: BLE001
+            pass
+        plan = kw.planned_sources(cfg, pending)
+        picked = kw.queries_of(plan)
+        extra = [kw.label(kind, q) for kind, q in plan if kind != "search"]
+
+        head = ("🔎 当前检索关键词（QQ 指定，发「/关键词 清空」恢复 config.toml）"
+                if pending else "🔎 当前检索关键词（来自 config.toml）")
+        lines = [head]
+        if picked:
+            lines.append(f"共 {len(picked)} 个，按优先级：")
+            lines.append(kw.block(picked))
+        else:
+            lines.append("没有配置关键词，只走推荐流")
+        if extra:
+            lines.append("另外还会走：" + " → ".join(extra))
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
     #  任务控制
     # ------------------------------------------------------------------
     def _running(self) -> bool:
@@ -222,12 +373,15 @@ class QQBot:
         """有不是 bot 启动的进程正在用浏览器（bat / 命令行 / login / doctor）。"""
         return not self._running() and self.lock.held_by_other()
 
-    def start(self, live: bool, limit: int | None) -> str:
+    def start(self, live: bool, limit: int | None, keywords: list[str] | None = None) -> str:
         if self._running():
             return f"已经有任务在跑：{self.task_desc}\n要换任务先发「/停止」"
         if self._external_running():
             return ("已经有一个任务在使用浏览器（不是从 QQ 启动的，比如 daily_greet.bat）。\n"
                     "这次不启动，免得两个任务抢同一个浏览器。要换任务先发「/停止」")
+
+        # 这次只搜哪些词：指令里带的 > 之前「/关键词」设定的 > config.toml
+        words = kw.normalize(keywords) if keywords else self.pending_keywords()
 
         args = [sys.executable, str(self.run_py), "greet"]
         if live:
@@ -236,6 +390,9 @@ class QQBot:
             args.append("--dry")
         if limit is not None:
             args += ["--limit", str(limit)]
+        if words:
+            # 竖线分隔：关键词里可能带空格或逗号，用参数传更稳
+            args += ["--keywords", "|".join(words)]
 
         self.cfg.stop_flag.unlink(missing_ok=True)
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
@@ -247,6 +404,8 @@ class QQBot:
                                 stderr=subprocess.DEVNULL, creationflags=flags)
         desc = (("实发" if live else "演练")
                 + (f"，最多 {limit} 条" if limit else "，投到额度用完"))
+        if words:
+            desc += f"，只搜 {len(words)} 个关键词"
         with self._lock:
             self.proc = proc
             self.task_desc = desc
@@ -257,7 +416,8 @@ class QQBot:
 
         warn = ("\n⚠️ 实发模式：会真实点「立即沟通」、消耗额度、触达 HR"
                 if live else "")
-        return f"▶️ 已启动：{desc}（pid {proc.pid}）{warn}\n每投出一条都会推送给你"
+        return (f"▶️ 已启动：{desc}（pid {proc.pid}）{warn}\n"
+                "本次检索关键词马上推送给你\n每投出一条也会推送")
 
     def stop(self) -> str:
         if self._external_running():
@@ -325,6 +485,9 @@ class QQBot:
     def status(self) -> str:
         cap = int(self.cfg.get("limits.daily_cap", 10))
         head = f"今日已投 {self._sent_today()} 条（本地上限 {cap}）"
+        pending = self.pending_keywords()
+        if pending:
+            head += f"\n🔎 已设定 {len(pending)} 个关键词（发「/关键词」查看）"
         if self._external_running():
             return f"🏃 有任务在运行（不是从 QQ 启动的，比如 daily_greet.bat）\n{head}"
         if not self._running():

@@ -18,7 +18,7 @@ import random
 import time
 from pathlib import Path
 
-from . import filters, humanize, overlay, prompts
+from . import filters, humanize, keywords as kw, overlay, prompts
 from .deepseek import DeepSeekError
 from .store import job_key
 
@@ -43,7 +43,8 @@ class StopRun(Exception):
 
 class GreetAgent:
     def __init__(self, cfg, client, session, store, vision, limit: int | None = None,
-                 dry_run: bool | None = None, verbose: bool = True, notifier=None):
+                 dry_run: bool | None = None, verbose: bool = True, notifier=None,
+                 keywords: list[str] | None = None):
         self.cfg = cfg
         # QQ 推送（autoboss.qq.Notifier）。None = 不推送
         self.notifier = notifier
@@ -65,6 +66,11 @@ class GreetAgent:
 
         # 职位来源："recommend" 走搜索框旁的推荐流；"search" 走关键词搜索
         self.source_mode = str(cfg.get("source.mode", "recommend")).lower()
+        # QQ 指令 / `greet --keywords` 临时指定的关键词：只搜这些，不掺推荐流。
+        # 指定了关键词还去走推荐流的话，用户会以为程序没听他的。
+        self.keywords = kw.split_keywords(keywords) if keywords else []
+        if self.keywords:
+            self.source_mode = "search"
         self.base_url = cfg.search_url(1)
         self.feed_url = self.base_url        # 进入推荐流后会被更新成实际地址
         self._scroll_pos = 0                 # 推荐流是无限滚动，用它渐进下探
@@ -87,13 +93,21 @@ class GreetAgent:
         self._filter_btn_box: tuple[float, float, float, float] | None = None
         # 筛选条件是否会随 URL 保留。点完筛选器后地址变了就说明会。
         self._filters_persist = False
-        # 连续多少屏挑不出合适的职位才收工。推荐流是无限滚动，
+        # 连续多少屏挑不出合适的职位才换下一个来源。推荐流是无限滚动，
         # 往下翻一段通常还能再出来一批，所以别翻两下就放弃。
         self.max_stalls = int(cfg.get("limits.max_empty_scans", 6))
-        # 整个任务**连续**多少屏一个可投的都没有就收工（跨来源累计，换关键词不清零）。
-        # 这时候再翻下去多半是在乱找、白烧模型调用；不如停下，过段时间新岗位上来了再投。
+        # 同一个来源里**连续**多少屏都是新岗位、却一个都不能投，就跳过这个关键词。
+        #
+        # ★ 以前这里是整个任务累计、换关键词不清零 ★ —— 2026-10-21 22:00 那次，
+        # 「大模型算法」6 屏 + 「大模型应用」2 屏全是日薪不够的，凑满 8 屏就
+        # 整轮收工了，后面 40 个关键词一个都没试到（日志：来源 2/42）。
+        # 一个关键词没货只说明这个词没货，不代表整个市场没岗位。
         self.max_dry = int(cfg.get("limits.max_dry_scans", 8))
         self._dry_streak = 0
+        # 连续多少个来源（关键词 / 推荐流）一条都没投出去就收工。
+        # 0 = 不限：把 [search].queries 全部走完。想省模型调用就设成 10~15。
+        self.max_dry_sources = int(cfg.get("limits.max_dry_sources", 0) or 0)
+        self._dry_sources = 0
         self._fresh_on_screen = 0
         # 这次被过滤的岗位按原因归类计数，收工时一并汇报
         self.filter_why: dict[str, int] = {}
@@ -224,28 +238,16 @@ class GreetAgent:
 
     # ------------------------------------------------------------------
     def _sources(self) -> list[tuple[str, str]]:
-        """本轮要走的职位来源，按顺序：[("recommend", ""), ("search", "大模型 实习"), ...]。
+        """本轮要走的职位来源，按顺序：[("search", "大模型算法"), ("recommend", ""), ...]。
 
         推荐流是有限的：加了「求职类型→实习」之后一个求职期望下只有二三十个岗位，
         翻到页脚就没了，离平台每天约 150 条的额度差得远。
         所以 mode = "both" 时推荐流走完接着按 [search].queries 逐个搜。
+
+        编排规则在 `autoboss.keywords.planned_sources`，QQ 推送和 bot 指令
+        用的是同一份 —— 这里只负责把 agent 自己的关键词覆盖传进去。
         """
-        mode = self.source_mode
-        queries = [str(q).strip() for q in (self.cfg.get("search.queries", []) or [])
-                   if str(q).strip()]
-        if not queries and str(self.cfg.get("search.query", "")).strip():
-            queries = [str(self.cfg.get("search.query")).strip()]
-        rec: list[tuple[str, str]] = []
-        if mode in ("recommend", "both"):
-            rec.append(("recommend", ""))
-            # 推荐旁边的求职期望标签，如「算法工程师(北京)」—— 又是一个独立的岗位池
-            rec.extend(("expect", str(t).strip())
-                       for t in (self.cfg.get("source.expect_tabs", []) or []) if str(t).strip())
-        search = [("search", q) for q in queries] if mode in ("search", "both") else []
-        # 实测推荐流（加实习筛选后）前排多是 SLAM / 机器人这些不对口的，
-        # 关键词搜索一屏四条全对口 —— 所以默认先搜关键词，推荐流放最后补漏
-        out = search + rec if self.cfg.get("source.recommend_last", False) else rec + search
-        return out or [("recommend", "")]
+        return kw.planned_sources(self.cfg, self.keywords, mode=self.source_mode)
 
     def _start_source(self, kind: str, query: str):
         """切到一个新来源：地址、滚动位置、筛选器状态都从头来。"""
@@ -259,6 +261,9 @@ class GreetAgent:
         self._filters_applied = False
         self._filters_persist = False
         self._filter_btn_box = None
+        # 「连续几屏都是新岗位但一个都不能投」是**按来源**数的：
+        # 换个关键词就是新的一池职位，上一池的欠账不该记到这一池头上。
+        self._dry_streak = 0
 
     def _tier_desc(self, tier: str) -> str:
         floor = self.rules.fit_min_low_wage.get(tier)
@@ -275,9 +280,7 @@ class GreetAgent:
             budget = min(budget, int(self.run_limit))
 
         sources = self._sources()
-        def label(k, q):
-            return {"recommend": "推荐流", "expect": f"「{q}」标签"}.get(k, f"搜「{q}」")
-        src = " → ".join(label(k, q) for k, q in sources)
+        src = " → ".join(kw.label(k, q) for k, q in sources)
         mode = "演练模式（不会真的发送）" if self.dry_run else "实发模式"
 
         lines = [
@@ -300,18 +303,33 @@ class GreetAgent:
         self.log("\n" + "\n".join(lines))
 
         for n, (kind, query) in enumerate(sources, 1):
+            sent_before = self.stats["sent"] + self.stats["dry_run"]
             self._start_source(kind, query)
             if len(sources) > 1:
-                self.log(f"\n══ 来源 {n}/{len(sources)}：{label(kind, query)} ══")
+                self.log(f"\n══ 来源 {n}/{len(sources)}：{kw.label(kind, query)} ══")
             self._enter_source()
-            if not self._source_ok:
-                continue
-            self._scan_source(budget, f"list_p{n}")
+            if self._source_ok:
+                self._scan_source(budget, f"list_p{n}")
+
+            # 这个来源一条都没投出去。只跳过它，接着试下一个关键词；
+            # 连续 max_dry_sources 个来源都没货才收工（0 = 不限，全部走完）。
+            if self.stats["sent"] + self.stats["dry_run"] == sent_before:
+                self._dry_sources += 1
+                if self.max_dry_sources > 0 and self._dry_sources >= self.max_dry_sources:
+                    raise StopRun(
+                        f"连续 {self._dry_sources} 个来源一条都没投出去，先停一停",
+                        "dry")
+            else:
+                self._dry_sources = 0
 
         self.log("\n  所有来源都走完了")
 
     def _scan_source(self, budget: int, tag: str):
-        """在当前来源里一屏屏往下扫，直到连续 max_stalls 屏没有可投的、或者翻到底。"""
+        """在当前来源里一屏屏往下扫，直到连续 max_stalls 屏没有可投的、或者翻到底。
+
+        连续 max_dry_scans 屏都是**新岗位**却一个都不能投时也提前收手 ——
+        这个关键词没货，换下一个比继续往下挖更值（整轮要不要停由 _loop 决定）。
+        """
         stalls = 0
         while stalls < self.max_stalls:
             self._check_remote_stop()
@@ -367,8 +385,13 @@ class GreetAgent:
                 # 整屏都是老面孔只说明这个关键词跟前面的重了，换下一个词就行
                 if not jobs or self._fresh_on_screen:
                     self._dry_streak += 1
-                if self._dry_streak >= self.max_dry:
-                    raise StopRun(f"连续 {self._dry_streak} 屏没有可投的岗位，先停一停", "dry")
+                if self.max_dry > 0 and self._dry_streak >= self.max_dry:
+                    # ★ 只放弃这一个关键词，不放弃整轮任务 ★
+                    # 这个池子翻这么深都没货，换下一个词比继续往下挖更值；
+                    # 整轮要不要停由 _loop 按「连续多少个来源都没投出去」决定。
+                    self.log(f"  · 连续 {self._dry_streak} 屏都是新岗位却一个都不能投，"
+                             "这个来源先跳过，换下一个")
+                    return
 
             self._advance_screen()
             # 连着两次滚不动 = 翻到页脚了。以前这里还会对着同一屏再看好几次，

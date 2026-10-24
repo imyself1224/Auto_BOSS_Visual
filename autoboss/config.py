@@ -48,7 +48,8 @@ _DEFAULTS: dict[str, dict[str, object]] = {
     },
     "limits": {
         "daily_cap": 10, "min_interval_sec": 25, "max_interval_sec": 60,
-        "max_empty_scans": 6, "max_dry_scans": 8, "active_hours": [9, 21],
+        "max_empty_scans": 6, "max_dry_scans": 8, "max_dry_sources": 0,
+        "active_hours": [9, 21],
     },
     "safety": {"dry_run": True, "stop_on_captcha": True},
     "qq": {
@@ -138,6 +139,11 @@ class Config:
     def lock_path(self) -> Path:
         """浏览器独占锁（见 autoboss/lock.py）。"""
         return PROJECT_ROOT / ".browser.lock"
+
+    @property
+    def qq_keywords_path(self) -> Path:
+        """QQ 上设定、下次任务沿用的检索关键词（一行一个）。发「/关键词 清空」删除。"""
+        return PROJECT_ROOT / ".qq_keywords.txt"
 
     def search_url(self, page: int = 1, query: str | None = None) -> str:
         from urllib.parse import quote
