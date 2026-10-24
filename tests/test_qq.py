@@ -7,6 +7,7 @@ OneBot 那头用本地起的假 websocket 服务代替，不需要真的 NapCat 
 """
 from __future__ import annotations
 
+import base64
 import io
 import json
 import sqlite3
@@ -24,7 +25,7 @@ from websockets.sync.server import serve  # noqa: E402
 
 from autoboss import config as cfgmod  # noqa: E402
 from autoboss.agent import StopRun  # noqa: E402
-from autoboss.qq import Notifier  # noqa: E402
+from autoboss.qq import Notifier, OneBot  # noqa: E402
 from autoboss.qqbot import QQBot  # noqa: E402
 from autoboss.qqlaunch import QQLauncher  # noqa: E402
 from test_agent_flow import GOOD_JOB, agent_env, silence  # noqa: E402
@@ -148,6 +149,25 @@ def test_notifier_queues_when_onebot_reports_failure():
         fake.close()
 
 
+def test_onebot_sends_text_and_image_segments():
+    fake = FakeOneBot()
+    try:
+        message = [
+            {"type": "text", "data": {"text": "帮助"}},
+            {"type": "image", "data": {"file": "base64://AA=="}},
+        ]
+        with OneBot(f"ws://127.0.0.1:{fake.port}") as bot:
+            bot.send_private(10001, message)
+        wait_for(lambda: fake.received)
+        act = fake.received[0] if fake.received else {}
+        params = act.get("params", {})
+        check("发给了大号", params.get("user_id"), 10001)
+        check("message 原样是数组", params.get("message"), message)
+        check("数组消息不带 auto_escape", "auto_escape" in params, False)
+    finally:
+        fake.close()
+
+
 def test_agent_notifies_each_sent_job():
     silence()
 
@@ -189,10 +209,15 @@ def test_agent_stops_on_remote_flag():
 # ---------------------------------------------------------------------------
 class FakeBotConn:
     def __init__(self):
-        self.sent: list[tuple[int, str]] = []
+        self.sent: list[tuple[int, object]] = []
 
-    def send_private(self, uid, text):
-        self.sent.append((uid, text))
+    def send_private(self, uid, message):
+        self.sent.append((uid, message))
+
+
+TINY_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+    "/x8AAwMCAO+/p9sAAAAASUVORK5CYII=")
 
 
 def make_bot(tmp: str) -> QQBot:
@@ -205,6 +230,11 @@ def make_bot(tmp: str) -> QQBot:
         "qq_keywords_path": property(lambda self: Path(tmp) / ".qq_keywords.txt"),
         "qq_prefs_path": property(lambda self: Path(tmp) / ".qq_prefs.json")})
     bot = QQBot(cfg, Path(__file__).resolve().parent.parent / "run.py")
+    # /帮助 会读 docs/commands.png；测试用临时目录和 1x1 小图，别读真图
+    bot.root = Path(tmp)
+    docs = Path(tmp) / "docs"
+    docs.mkdir(exist_ok=True)
+    (docs / "commands.png").write_bytes(TINY_PNG)
 
     # ★ 测试绝不能真的起投递进程 —— 那会用真实配置去 BOSS 直聘实发 ★
     def no_spawn(*a, **kw):
@@ -232,11 +262,44 @@ def test_bot_only_obeys_owner_private_chat():
         bot._on_event({"post_type": "message", "message_type": "private",
                        "user_id": 10001, "raw_message": "/帮助"})
         check("大号的私聊会回复", len(bot.bot.sent), 1)
-        check_true("回复的是帮助", bot.bot.sent and "指令" in bot.bot.sent[0][1])
+        help_msg = bot.bot.sent[0][1] if bot.bot.sent else ""
+        help_text = (help_msg[0]["data"]["text"]
+                     if isinstance(help_msg, list) else help_msg)
+        check_true("回复的是帮助", "指令" in help_text)
         check("没有误启动任务", bot.proc, None)
         bot._on_event({"post_type": "message", "message_type": "private",
                        "user_id": 10001, "raw_message": "/&#91;x&#93;"})
         check_true("CQ 转义会还原", len(bot.bot.sent) == 2 and "「[x]」" in bot.bot.sent[1][1])
+
+
+def test_bot_help_sends_text_and_image_once():
+    with tempfile.TemporaryDirectory() as tmp:
+        bot = make_bot(tmp)
+        bot.bot = FakeBotConn()
+        bot._on_event({"post_type": "message", "message_type": "private",
+                       "user_id": 10001, "raw_message": "/帮助"})
+        check("只发一条消息", len(bot.bot.sent), 1)
+        uid, message = bot.bot.sent[0]
+        check("发给大号", uid, 10001)
+        check_true("消息是文本 + 图片段数组", isinstance(message, list))
+        check("一共两段", len(message), 2)
+        check("第一段是文本", message[0].get("type"), "text")
+        check("第二段是图片", message[1].get("type"), "image")
+        file = message[1].get("data", {}).get("file", "")
+        check_true("图片用 base64://", file.startswith("base64://"))
+        check("图片内容和 commands.png 一致",
+              base64.b64decode(file[len("base64://"):]), TINY_PNG)
+
+        text = message[0]["data"]["text"]
+        help_lines = [ln.strip() for ln in text.splitlines()
+                      if ln.strip().startswith("/")]
+        for cmd in ("/投递", "/演练", "/学历", "/薪资", "/关键词", "/配置", "/停止"):
+            check(f"文本里 {cmd} 只有一条",
+                  sum(1 for ln in help_lines if ln.startswith(cmd)), 1)
+        for cmd in ("/状态", "/今日", "/统计", "/日志", "/重启", "/关机",
+                    "/取消", "/帮助"):
+            check(f"文本里不重复介绍 {cmd}", cmd in text, False)
+        check_true("提示完整表在图片里", "完整指令表见下图" in text)
 
 
 def test_bot_command_parsing():
@@ -630,8 +693,10 @@ if __name__ == "__main__":
     for fn in (test_notifier_sends_private_msg, test_notifier_disabled_or_down_is_harmless,
                test_notifier_flushes_outbox_when_back_online,
                test_notifier_queues_when_onebot_reports_failure,
+               test_onebot_sends_text_and_image_segments,
                test_agent_notifies_each_sent_job, test_agent_stops_on_remote_flag,
                test_bot_only_obeys_owner_private_chat, test_bot_command_parsing,
+               test_bot_help_sends_text_and_image_once,
                test_bot_education_and_salary_commands,
                test_bot_config_command, test_bot_config_reset,
                test_bot_keywords_set_and_clear, test_bot_start_passes_keywords_to_greet,

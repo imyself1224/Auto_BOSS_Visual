@@ -16,6 +16,7 @@ daily_greet.bat）：这时「投递」会被拒绝，「状态」能看到它�
 """
 from __future__ import annotations
 
+import base64
 import os
 import sqlite3
 import subprocess
@@ -35,42 +36,17 @@ from .lock import BrowserLock
 from .qq import Notifier, OneBot
 from .qqlaunch import QQLauncher
 
-HELP = """🤖 auto_boss 指令（以 / 开头）
+HELP = """🤖 auto_boss 投递指令
 
-📮 投递（只接受条数）
-/投递              实发，投到平台额度用完
-/投递 10           实发，本次最多 10 条
-/演练              只筛选不发送（默认 5 条）
-/演练 5            只筛选不发送，最多 5 条
+/投递 [条数]       实发，不写条数就投到平台额度用完
+/演练 [条数]       只筛选不发送（默认 5 条）
+/学历 [档位|不限]   岗位学历要求，如 /学历 硕士、/学历 不限
+/薪资 [日薪|不限]   日薪下限，如 /薪资 300；也认 月薪8000 / 8k
+/关键词 [词...|清空] 检索关键词，如 /关键词 大模型算法 Agent
+/配置 [清空]       查看当前配置；清空 = 恢复最开始的状态
+/停止             让正在跑的任务收尾退出
 
-🎓 学历（写进 BOSS 搜索地址的 degree 参数，由平台筛）
-/学历              看当前设置
-/学历 硕士         只看要求硕士的岗位（可选 不限 / 大专 / 本科 / 硕士 / 博士）
-/学历 不限         不限制学历（设了具体档位后「学历不限」的岗位会被平台排除）
-
-💰 薪资（BOSS 没有日薪档，日薪下限由程序按卡片薪资精确比较）
-/薪资              看当前设置
-/薪资 300          设定日薪下限；也可写 月薪8000、8k，自动折成日薪
-/薪资 不限         不按薪资筛
-
-🔎 关键词
-/关键词            看当前检索关键词
-/关键词 大模型算法 Agent   设定检索关键词（之后一直沿用）
-/关键词 清空       恢复用 config.toml 的 [search].queries
-
-🔧 查看
-/配置              查看当前全部要求（学历 / 薪资 / 关键词 / 其他硬条件）
-/配置 清空         恢复最开始的状态：关键词用 config.toml、学历不限、日薪 300
-/状态              是否在跑、今日已投多少、当前学历薪资
-
-/停止              让正在跑的任务收尾退出
-/今日              今天投了哪些岗位
-/统计              今日各状态计数 + 最近几次运行
-/日志 [20]         最近一份运行日志的末尾几行
-/重启 / 关机       60 秒后重启 / 关闭电脑；/取消 撤销
-/帮助              显示本说明
-
-⚠️ /投递 不再接受关键词 / 学历 / 薪资，那些都用上面单独的指令设置。"""
+完整指令表见下图（其余指令都在图里）。"""
 
 def cq_unescape(text: str) -> str:
     """raw_message 是 CQ 码字符串，[ ] , & 会被转义成 &#91; 之类，还原成原字符。"""
@@ -205,6 +181,33 @@ class QQBot:
         if self.bot is not None:
             self.bot.send_private(self.owner, text)
 
+    def reply_help(self):
+        """`/帮助`：文本 + docs/commands.png **同一条消息**发出去。
+
+        文本只列投递相关指令，完整指令表在图片里；图片用 OneBot 的
+        `base64://` 图片段，SnowLuma / NapCat 都能直接上传。
+        """
+        if self.bot is None:
+            return
+        image = self.root / "docs" / "commands.png"
+        segments = [{"type": "text", "data": {"text": HELP}}]
+        if image.is_file():
+            try:
+                payload = base64.b64encode(image.read_bytes()).decode("ascii")
+                segments.append({"type": "image",
+                                 "data": {"file": f"base64://{payload}"}})
+            except OSError as exc:
+                print(f"  [qq] 帮助图片读取失败：{exc}")
+        if len(segments) == 1:
+            self.bot.send_private(self.owner, HELP)
+            return
+        try:
+            self.bot.send_private(self.owner, segments)
+        except Exception as exc:  # noqa: BLE001 —— 图片发不出去时退回纯文本
+            print(f"  [qq] 帮助图片发送失败，退回纯文本："
+                  f"{type(exc).__name__}: {exc}")
+            self.bot.send_private(self.owner, HELP)
+
     # ------------------------------------------------------------------
     def _on_event(self, event: dict):
         if (event.get("post_type") != "message"
@@ -220,7 +223,11 @@ class QQBot:
             return
         print(f"[{datetime.now():%H:%M:%S}] 收到指令：{text}")
         try:
-            self.reply(self.handle(text))
+            reply = self.handle(text)
+            if reply == HELP:
+                self.reply_help()       # 文本 + 指令表图片，一条消息
+            else:
+                self.reply(reply)
         except Exception as exc:  # noqa: BLE001 —— 一条指令出错不能把 bot 带崩
             self.reply(f"❌ 执行出错：{type(exc).__name__}: {exc}")
 

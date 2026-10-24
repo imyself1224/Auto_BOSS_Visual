@@ -50,12 +50,19 @@ class OneBot:
                 pass
             self.ws = None
 
-    def send_private(self, user_id: int, text: str) -> str:
-        """发私聊，返回 echo。默认不等回执；Notifier 会拿 echo 去等发送结果。"""
+    def send_private(self, user_id: int, message) -> str:
+        """发私聊，返回 echo。默认不等回执；Notifier 会拿 echo 去等发送结果。
+
+        `message` 可以是纯文本，也可以是 OneBot 消息段数组（文本 + 图片），
+        数组时**不能**带 `auto_escape`，否则图片段会被当成转义文本。
+        """
         echo = uuid.uuid4().hex[:8]
+        params = {"user_id": int(user_id), "message": message}
+        if isinstance(message, str):
+            params["auto_escape"] = True
         self.ws.send(json.dumps({
             "action": "send_private_msg",
-            "params": {"user_id": int(user_id), "message": text, "auto_escape": True},
+            "params": params,
             "echo": echo,
         }, ensure_ascii=False))
         return echo
