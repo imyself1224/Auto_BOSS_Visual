@@ -107,22 +107,32 @@
     width: 300px;
     flex: 0 0 300px;
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     justify-content: center;
-    height: 214px;
+    height: 238px;
   }
-  .mascot svg {
-    width: 300px;
-    height: 214px;
+  .mascot::before {
+    content: "";
+    position: absolute;
+    width: 252px;
+    height: 252px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 50% 46%, rgba(77,107,254,.22), rgba(77,107,254,0) 70%);
+    filter: blur(2px);
+  }
+  .mascot img.pet {
+    width: 242px;
+    height: auto;
     position: relative;
     z-index: 1;
-    filter: drop-shadow(0 18px 26px rgba(77,107,254,.22));
+    margin-top: 18px;
+    filter: drop-shadow(0 16px 22px rgba(77,107,254,.25));
   }
   .bubble {
     position: absolute;
-    top: 12px;
-    right: 4px;
-    z-index: 2;
+    top: 0;
+    right: 0;
+    z-index: 3;
     padding: 8px 13px;
     border-radius: 14px 14px 14px 4px;
     background: #fff;
@@ -267,7 +277,7 @@
 <body>
   <div class="hero">
     <div class="hero-text">
-      <div class="kicker">🐳 DEEPSEEK 蓝 · 大肥鱼版</div>
+      <div class="kicker">🐳 DEEPSEEK 蓝 · dsh-pet 桌宠版</div>
       <h1>auto_boss <span>指令表</span></h1>
       <p class="subtitle">
         一条 <code>/投递</code> 只管发多少条；关键词、学历、薪资都用单独的指令设置。
@@ -277,56 +287,7 @@
 
     <div class="mascot">
       <div class="bubble">今天也要好好投递鸭～</div>
-      <svg viewBox="0 0 300 214" aria-hidden="true">
-        <defs>
-          <linearGradient id="whaleBody" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stop-color="#83a0ff"/>
-            <stop offset="1" stop-color="#405ef0"/>
-          </linearGradient>
-          <linearGradient id="whaleBelly" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stop-color="#ffffff"/>
-            <stop offset="1" stop-color="#dbe6ff"/>
-          </linearGradient>
-          <radialGradient id="whaleGlow" cx="50%" cy="50%" r="50%">
-            <stop offset="0" stop-color="#4d6bfe" stop-opacity=".30"/>
-            <stop offset="1" stop-color="#4d6bfe" stop-opacity="0"/>
-          </radialGradient>
-        </defs>
-
-        <circle cx="150" cy="116" r="102" fill="url(#whaleGlow)"/>
-
-        <!-- 尾巴 -->
-        <path d="M226 132 C258 112 274 86 268 66 C254 76 244 92 236 108
-                 C231 86 218 69 203 60 C207 84 214 106 226 124 Z" fill="#415fef"/>
-        <!-- 身体（圆滚滚的大肥鱼） -->
-        <ellipse cx="142" cy="122" rx="99" ry="79" fill="url(#whaleBody)"/>
-        <!-- 肚皮 -->
-        <ellipse cx="142" cy="154" rx="69" ry="42" fill="url(#whaleBelly)"/>
-        <!-- 左鳍 -->
-        <path d="M56 132 C34 141 26 160 37 174 C50 168 61 153 66 137 Z" fill="#5b7bff"/>
-        <!-- 右鳍 -->
-        <path d="M224 142 C244 153 252 171 241 183 C228 175 219 160 215 146 Z" fill="#5b7bff"/>
-        <!-- 水花 -->
-        <path d="M124 50 C120 31 126 20 134 11 C136 26 134 38 130 50"
-              fill="none" stroke="#7dd3fc" stroke-width="7" stroke-linecap="round"/>
-        <path d="M151 48 C155 29 163 20 171 15 C167 30 161 41 157 50"
-              fill="none" stroke="#7dd3fc" stroke-width="7" stroke-linecap="round"/>
-        <!-- 眼睛 -->
-        <ellipse cx="103" cy="111" rx="7" ry="9" fill="#16203a"/>
-        <ellipse cx="176" cy="111" rx="7" ry="9" fill="#16203a"/>
-        <circle cx="105.5" cy="107.5" r="2.2" fill="#ffffff"/>
-        <circle cx="178.5" cy="107.5" r="2.2" fill="#ffffff"/>
-        <!-- 腮红 -->
-        <ellipse cx="80" cy="132" rx="15" ry="8" fill="#ff9db6" opacity=".62"/>
-        <ellipse cx="198" cy="132" rx="15" ry="8" fill="#ff9db6" opacity=".62"/>
-        <!-- 笑嘴 -->
-        <path d="M124 133 Q143 151 162 133" fill="none"
-              stroke="#16203a" stroke-width="5" stroke-linecap="round"/>
-        <!-- 气泡 -->
-        <circle cx="250" cy="56" r="6" fill="#bfd0ff"/>
-        <circle cx="266" cy="35" r="4" fill="#d6e1ff"/>
-        <circle cx="26" cy="76" r="5" fill="#bfd0ff"/>
-      </svg>
+      <img class="pet" src="dsh-pet.png" alt="dsh-pet 桌宠">
     </div>
   </div>
 
@@ -450,7 +411,7 @@
 
     <div class="card-foot">
       <span><span class="fish-dot">●</span> 只认大号私聊里以 <code>/</code> 开头的消息，其他一律不理</span>
-      <span>更多说明见 README · auto_boss</span>
+      <span>更多说明见 README · 桌宠形象 dsh-pet（MIT）</span>
     </div>
   </div>
 </body>

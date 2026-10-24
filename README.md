@@ -410,6 +410,7 @@ bot 出现未预期异常时会自动把最近日志推给大号；**断网时�
 ![auto_boss QQ 指令表](docs/commands.png)
 
 > 表格源文件：[docs/commands.html](docs/commands.html)，改完重新截图即可。
+> 桌宠形象来自 [dsh-pet](https://github.com/PC2005-cloud/dsh-pet)（MIT）。
 
 例子（先设条件，再投递）：
 
@@ -484,8 +485,9 @@ Auto_BOSS_Visual/
 │   ├── qqlaunch.py         自动拉起 SnowLuma 和 QQ
 │   └── config.py           配置加载（tomllib + .env 解析）
 ├── docs/
-│   ├── commands.html       指令表源文件（蓝色大肥鱼版）
-│   └── commands.png        指令表截图（README 引用）
+│   ├── commands.html       指令表源文件（dsh-pet 桌宠版）
+│   ├── commands.png        指令表截图（README 引用）
+│   └── dsh-pet.png         桌宠形象（来自 dsh-pet 插件，MIT）
 ├── tests/
 ├── daily_greet.bat         无人值守投递
 └── start_bot.bat           启动 QQ 机器人
