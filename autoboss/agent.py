@@ -45,7 +45,7 @@ class GreetAgent:
     def __init__(self, cfg, client, session, store, vision, limit: int | None = None,
                  dry_run: bool | None = None, verbose: bool = True, notifier=None,
                  keywords: list[str] | None = None,
-                 education: tuple[str, str] | None = None,
+                 education: str | None = None,
                  min_wage: float | None = None):
         self.cfg = cfg
         # QQ 推送（autoboss.qq.Notifier）。None = 不推送
@@ -112,12 +112,11 @@ class GreetAgent:
         # 这次被过滤的岗位按原因归类计数，收工时一并汇报
         self.filter_why: dict[str, int] = {}
 
-        edu_min, edu_max = preferences.education_from_config(cfg)
+        edu = preferences.education_from_config(cfg)
         self.rules = filters.Rules(
             require_internship=bool(cfg.get("job_filter.require_internship", True)),
             min_daily_wage=float(cfg.get("job_filter.min_daily_wage", 300)),
-            education_min=edu_min,
-            education_max=edu_max,
+            education=edu,
             work_days_per_month=float(cfg.get("job_filter.work_days_per_month", 21.75)),
             allow_unparsable=bool(cfg.get("job_filter.allow_unparsable", False)),
             require_city=str(cfg.get("job_filter.require_city", "北京")),
@@ -128,20 +127,16 @@ class GreetAgent:
             prefer_district_bonus=float(
                 cfg.get("job_filter.prefer_district_bonus", 1.0)),
         )
-        # QQ 指令 / `greet --education-min/--education-max/--min-wage` 带来的临时条件。
-        # None = 没指定（用 config 的）；("","") = 明确不限，要盖住 config。
+        # QQ 指令 / `greet --education/--min-wage` 带来的临时条件。
+        # None = 没指定（用 config 的）；"" = 明确不限，要盖住 config。
         if education is not None:
-            low, high = education
-            self.rules.education_min = (
-                preferences.normalize_education(low, allow_above=True) or "")
-            self.rules.education_max = (
-                preferences.normalize_education(high, allow_above=True) or "")
+            self.rules.education = (
+                preferences.normalize_education(education, allow_above=True) or "")
         if min_wage is not None:
             self.rules.min_daily_wage = float(min_wage)
-        # 学历筛选直接写进 BOSS 搜索地址（degree=203,204），由平台完成 ——
+        # 学历筛选直接写进 BOSS 搜索地址（degree=204），由平台完成 ——
         # 不让模型读学历、也不用点筛选栏。卡片标签只做兜底复核（见 filters.evaluate）。
-        self.degree_param = preferences.degree_param(
-            self.rules.education_min, self.rules.education_max)
+        self.degree_param = preferences.degree_param(self.rules.education)
         # 学历参数要在这里才能拼：rules 是上面几行才最终确定的
         self.base_url = cfg.search_url(1, degree=self.degree_param)
         self.feed_url = self.base_url        # 进入推荐流后会被更新成实际地址
@@ -308,9 +303,8 @@ class GreetAgent:
         wage = (f"日薪中位 ≥{self.rules.min_daily_wage:.0f}"
                 if self.rules.min_daily_wage > 0 else "薪资不限")
         education = ""
-        if self.rules.education_min or self.rules.education_max:
-            education = " · 学历要求 " + preferences.education_text(
-                self.rules.education_min, self.rules.education_max)
+        if self.rules.education:
+            education = f" · 学历要求 {self.rules.education}"
 
         lines = [
             "─" * 62,
@@ -890,7 +884,7 @@ class GreetAgent:
     def _why_category(reason: str) -> str:
         for key, label in (("不是实习", "不是实习"), ("日薪中位", "日薪不够"),
                            ("日薪最低", "产品/测试薪资不够"), ("没有可投的档位", "方向不对口"),
-                           ("高于最高学历", "学历不够"), ("低于最低学历", "学历不够"),
+                           ("不是设置的", "学历不够"),
                            ("地点", "不在北京"), ("无法解析", "薪资读不出")):
             if key in reason:
                 return label

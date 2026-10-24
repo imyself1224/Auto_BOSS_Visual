@@ -1,4 +1,4 @@
-"""学历区间 / 薪资指令解析与持久化的测试。不依赖 pytest。
+"""学历（单个档位）/ 薪资指令解析与持久化的测试。不依赖 pytest。
 
     python tests/test_preferences.py
 """
@@ -59,34 +59,27 @@ def test_normalize_education():
     check("rank 读不出", p.rank_of(None), 0)
 
 
-def test_education_range():
-    check("两个档位", p.parse_education_range(["本科", "硕士"]), (("本科", "硕士"), []))
-    check("不限做下限", p.parse_education_range(["不限", "硕士"]), (("", "硕士"), []))
-    check("不限做上限", p.parse_education_range(["本科", "不限"]), (("本科", ""), []))
-    check("只写一个 = 只看这一档",
-          p.parse_education_range(["本科"]), (("本科", "本科"), []))
-    check("两项都不限", p.parse_education_range(["不限", "不限"]), (("", ""), []))
-    check("「清空」等于两项不限", p.parse_education_range(["清空"]), (("", ""), []))
-    check("没参数 = 查看", p.parse_education_range([]), (None, []))
+def test_parse_education():
+    check("硕士", p.parse_education("硕士"), ("硕士", ""))
+    check("不限", p.parse_education("不限"), ("", ""))
+    check("清空 → 不限", p.parse_education("清空"), ("", ""))
+    check("学历=本科", p.parse_education("学历=本科"), ("本科", ""))
 
-    bounds, errors = p.parse_education_range(["本科及以上", "硕士"])
-    check("岗位要求写法被拒绝", bounds, None)
-    check_true("给出人话提示", errors and "岗位要求" in errors[0])
+    value, error = p.parse_education("本科及以上")
+    check("岗位要求写法被拒绝", value, None)
+    check_true("给出人话提示", "岗位要求" in error)
 
-    bounds, errors = p.parse_education_range(["硕士", "本科"])
-    check("最低高于最高被拒绝", bounds, None)
-    check_true("提示顺序", errors and "不能高于" in errors[0])
+    value, error = p.parse_education("火星")
+    check("认不出被拒绝", value, None)
+    check_true("提示可选档位", "可写" in error)
 
-    bounds, errors = p.parse_education_range(["本科", "硕士", "博士"])
-    check("参数太多被拒绝", bounds, None)
 
-    bounds, errors = p.parse_education_range(["火星", "硕士"])
-    check("认不出被拒绝", bounds, None)
-
-    check("展示：不限 – 硕士", p.education_text("", "硕士"), "不限 – 硕士")
-    check("展示：本科 – 硕士", p.education_text("本科", "硕士"), "本科 – 硕士")
-    check("展示：只一档", p.education_text("本科", "本科"), "本科")
-    check("展示：都不限", p.education_text("", ""), "不限")
+def test_degree_param():
+    check("硕士", p.degree_param("硕士"), "204")
+    check("本科", p.degree_param("本科"), "203")
+    check("大专", p.degree_param("大专"), "202")
+    check("不限 = 不带参数", p.degree_param("不限"), "")
+    check("空 = 不带参数", p.degree_param(""), "")
 
 
 # ===========================================================================
@@ -110,38 +103,37 @@ def test_wage_parsing():
 # ===========================================================================
 #  持久化
 # ===========================================================================
-def test_degree_param():
-    check("本科+硕士", p.degree_param("本科", "硕士"), "203,204")
-    check("不限–硕士", p.degree_param("", "硕士"), "209,208,206,202,203,204")
-    check("本科–不限", p.degree_param("本科", ""), "203,204,205")
-    check("单档", p.degree_param("本科", "本科"), "203")
-    check("全不限 = 不带参数", p.degree_param("", ""), "")
-    check("「不限」写法也认", p.degree_param("不限", "硕士"), "209,208,206,202,203,204")
-
-
 def test_prefs_roundtrip():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / ".qq_prefs.json"
 
         check("没有文件时是空的", p.load_prefs(path).is_empty(), True)
 
-        saved = p.Prefs(education=("", "硕士"), min_wage=300.0)
+        saved = p.Prefs(education="硕士", min_wage=300.0)
         p.save_prefs(path, saved)
         check("保存后能读回来", p.load_prefs(path), saved)
         data = json.loads(path.read_text(encoding="utf-8"))
-        check("落盘内容是 JSON", data, {"education": ["", "硕士"], "min_wage": 300.0})
+        check("落盘内容是 JSON", data, {"education": "硕士", "min_wage": 300.0})
 
         # 明确「不限」要能存住（空串不能读成「没设置」）
-        p.save_prefs(path, p.Prefs(education=("", ""), min_wage=0.0))
+        p.save_prefs(path, p.Prefs(education="", min_wage=0.0))
         loaded = p.load_prefs(path)
-        check("学历不限存得住", loaded.education, ("", ""))
+        check("学历不限存得住", loaded.education, "")
         check("薪资不限存得住", loaded.min_wage, 0.0)
 
-        # 旧格式（上一版只存一个「我的最高学历」）要能迁移
-        path.write_text('{"education": "本科", "min_wage": 300}', encoding="utf-8")
+        # 上一版存的是「最低, 最高」数组，迁移成上限那一档
+        path.write_text('{"education": ["", "硕士"], "min_wage": 300}',
+                        encoding="utf-8")
         loaded = p.load_prefs(path)
-        check("旧格式迁成「不限 – 本科」", loaded.education, ("", "本科"))
+        check("旧区间迁成上限", loaded.education, "硕士")
         check("旧格式的薪资照读", loaded.min_wage, 300.0)
+
+        path.write_text('{"education": ["本科", "硕士"]}', encoding="utf-8")
+        check("旧区间取最高档", p.load_prefs(path).education, "硕士")
+
+        # 更早的格式：只存一个字符串
+        path.write_text('{"education": "本科"}', encoding="utf-8")
+        check("旧字符串照读", p.load_prefs(path).education, "本科")
 
         # 两项都回到「没设置」时删文件
         p.save_prefs(path, p.Prefs())
@@ -151,35 +143,38 @@ def test_prefs_roundtrip():
         path.write_text("{不是 json", encoding="utf-8")
         check("坏文件按空设置处理", p.load_prefs(path).is_empty(), True)
 
-        path.write_text('{"education": ["本科", "硕士"], "min_wage": "abc"}',
+        path.write_text('{"education": "硕士", "min_wage": "abc"}',
                         encoding="utf-8")
         loaded = p.load_prefs(path)
         check("坏的日薪被忽略", loaded.min_wage, None)
-        check("好的学历照常读", loaded.education, ("本科", "硕士"))
+        check("好的学历照常读", loaded.education, "硕士")
 
 
 def test_with_and_describe():
-    prefs = p.Prefs(education=("本科", "硕士"), min_wage=300.0)
+    prefs = p.Prefs(education="硕士", min_wage=300.0)
 
-    changed = prefs.with_education("", "博士")
-    check("改学历区间", changed.education, ("", "博士"))
+    changed = prefs.with_education("")
+    check("改成不限", changed.education, "")
     check("改学历不动薪资", changed.min_wage, 300.0)
 
     changed = prefs.with_wage(0.0)
     check("改薪资", changed.min_wage, 0.0)
-    check("改薪资不动学历", changed.education, ("本科", "硕士"))
+    check("改薪资不动学历", changed.education, "硕士")
 
     text = p.describe(prefs)
-    check_true("描述里有学历区间", "本科 – 硕士" in text)
+    check_true("描述里有学历", "硕士" in text)
     check_true("描述里有日薪", "300" in text)
-    check_true("状态行有学历", "本科 – 硕士" in p.status_line(prefs))
+    check_true("状态行有学历", "硕士" in p.status_line(prefs))
     check_true("空设置说明按 config", "config" in p.status_line(p.Prefs()))
     check_true("不限能显示出来",
-               "不限" in p.status_line(p.Prefs(education=("", ""), min_wage=0.0)))
+               "不限" in p.status_line(p.Prefs(education="", min_wage=0.0)))
+    check("education_label 未设置", p.education_label(None), "未设置（按 config.toml）")
+    check("education_label 不限", p.education_label(""), "不限")
+    check("education_label 档位", p.education_label("本科"), "本科")
 
 
 if __name__ == "__main__":
-    for fn in (test_normalize_education, test_education_range, test_degree_param,
+    for fn in (test_normalize_education, test_parse_education, test_degree_param,
                test_wage_parsing, test_prefs_roundtrip, test_with_and_describe):
         try:
             fn()

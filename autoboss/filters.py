@@ -179,10 +179,9 @@ class Rules:
     work_days_per_month: float = 21.75
     allow_unparsable: bool = False
     require_city: str = "北京"
-    # 学历要求区间（空串 = 该边界不限）。岗位要求落在区间内才投；
-    # 卡片上读不出学历的放行 —— 和城市读不到不拦是同一个原则。
-    education_min: str = ""
-    education_max: str = ""
+    # 学历（单个档位，空串 = 不筛）。主筛由 BOSS URL 的 degree 参数完成；
+    # 这里只是拿卡片标签复核一遍，读不出学历的放行 —— 和城市读不到不拦一致。
+    education: str = ""
     # 档位 → 排序分。模型把岗位跟求职者画像（resume/kb.md）对比后判一个档位
     # （最匹配 / 次匹配 / 可转投 / 不可用）。
     # **表里没有的档位一律不打招呼** —— 所以「不可用」不写进来即可。
@@ -231,20 +230,14 @@ def evaluate(job: dict, rules: Rules) -> Verdict:
     else:
         reasons.append("实习岗")
 
-    # ---- 硬条件 2：学历区间（兜底复核）----
-    # 学历主要由 BOSS 搜索地址的 degree 参数筛，这里只是拿卡片标签复核一遍
-    # （标签本来就要读，不额外花模型调用）。读不出学历的放行 —— 和城市读不到不拦一致。
+    # ---- 硬条件 2：学历（兜底复核）----
+    # 主筛是 BOSS 搜索地址的 degree 参数；这里拿卡片标签复核，读不出就放行。
     # 「学历不限」按最低档（rank 0）算，和 BOSS 的 URL 行为一致。
-    low = preferences.rank_of(rules.education_min)
-    high = preferences.rank_of(rules.education_max) or 99
-    if hard_fail is None and (low or high < 99):
+    if hard_fail is None and rules.education:
         required = job_education(job)
         if required:
-            req_rank = preferences.rank_of(required)
-            if req_rank < low:
-                hard_fail = f"要求{required}，低于最低学历{rules.education_min}"
-            elif req_rank > high:
-                hard_fail = f"要求{required}，高于最高学历{rules.education_max}"
+            if preferences.rank_of(required) != preferences.rank_of(rules.education):
+                hard_fail = f"要求{required}，不是设置的{rules.education}"
             else:
                 reasons.append(f"学历要求{required}")
 

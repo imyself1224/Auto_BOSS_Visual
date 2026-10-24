@@ -1,15 +1,17 @@
-"""QQ 上设置投递偏好：学历区间、薪资（日薪下限）。
+"""QQ 上设置投递偏好：学历（单个档位）、薪资（日薪下限）。
 
 单独一个模块，因为三处共用同一套规则：
 
-* QQ 指令 `/学历 最低 最高`、`/薪资 300` 的解析；
+* QQ 指令 `/学历 硕士`、`/薪资 300` 的解析；
 * `run.py bot` 把设定存进 `.qq_prefs.json`，下次任务沿用；
-* `greet --education-min/--education-max/--min-wage` 和 agent 用同一套规范化。
+* `greet --education 硕士 --min-wage 300` 和 agent 用同一套规范化。
 
 语义：
 
-* **学历区间**会拼成 BOSS 搜索地址的 `degree` 参数（如 `203,204`），由平台在 URL 层筛，
-  不花模型调用；设了区间后 BOSS 会排除写着「学历不限」的岗位（平台原生行为）。
+* **学历只设一个档位**（`/学历 硕士`），拼成 BOSS 搜索地址的 `degree` 参数
+  （硕士 = `204`），由平台在 URL 层筛，不花模型调用。
+  `/学历 不限` = 不带 degree 参数、不按学历筛。
+  设了具体档位后 BOSS 会排除写着「学历不限」的岗位（平台原生行为）。
 * **薪资 = 日薪下限**，口径和 `[job_filter].min_daily_wage` 完全一致（区间取中位数）。
   BOSS 的薪资档位只有月薪、没有日薪档，所以这项由程序按卡片薪资精确比较。
   写月薪（`月薪8000` / `8k`）会按 21.75 个工作日折成日薪。
@@ -81,7 +83,7 @@ def normalize_education(value, *, allow_above: bool = False) -> str | None:
       * `None` —— 认不出（调用方决定是报错还是当关键词）。
 
     `allow_above=True` 用于解析**岗位要求**（「本科及以上」→ 本科）；
-    QQ 指令那边用默认值：那是在填学历区间，遇到「及以上」应当提示用户改写法。
+    QQ 指令那边用默认值：那是在填一个学历档位，遇到「及以上」应当提示用户改写法。
     """
     s = _clean(value)
     if not s:
@@ -113,88 +115,47 @@ def rank_of(value) -> int:
     return EDUCATION_RANK.get(got or "", 0)
 
 
-def education_text(low: str = "", high: str = "") -> str:
-    """「不限 – 硕士」「本科」这种人话展示。"""
-    low_t = low or "不限"
-    high_t = high or "不限"
-    if low_t == high_t:
-        return low_t
-    return f"{low_t} – {high_t}"
+def education_label(value: str | None) -> str:
+    """人话展示：None = 未设置（按 config），"" = 不限，其他 = 档位。"""
+    if value is None:
+        return "未设置（按 config.toml）"
+    return value or "不限"
 
 
-def degree_param(low: str = "", high: str = "") -> str:
-    """把学历区间换成 BOSS URL 的 `degree` 参数（逗号分隔）。
+def degree_param(education: str = "") -> str:
+    """把学历换成一个 BOSS URL 的 degree 代码；「不限」返回空串。"""
+    value = normalize_education(education, allow_above=True) or ""
+    return DEGREE_CODES.get(value, "")
 
-    两边都不限时返回空串（不带 degree 参数）。
-    注意：一旦带上 degree，BOSS 会**排除掉写着「学历不限」的岗位** ——
-    这是它的原生筛选行为，没法在同一个请求里既限学历又保留「不限」。
+
+def parse_education(value) -> tuple[str | None, str]:
+    """解析 `/学历` 的一个参数：返回 (规范值, 错误提示)。
+
+    规范值 `""` = 不限；`None` = 认不出（第二项是给用户看的原因）。
     """
-    low = normalize_education(low, allow_above=True) or ""
-    high = normalize_education(high, allow_above=True) or ""
-    if not low and not high:
-        return ""
-    low_rank = EDUCATION_RANK.get(low, 1) if low else 1
-    high_rank = (EDUCATION_RANK.get(high, len(EDUCATION_LEVELS))
-                 if high else len(EDUCATION_LEVELS))
-    if low_rank > high_rank:
-        return ""
-    return ",".join(
-        DEGREE_CODES[name] for name in EDUCATION_LEVELS
-        if low_rank <= EDUCATION_RANK[name] <= high_rank)
+    got = normalize_education(value)
+    if got is not None:
+        return got, ""
+    if looks_like_education(value):
+        return None, (f"「{value}」是岗位要求的写法；写一个档位即可"
+                      "（不限 / 大专 / 本科 / 硕士 / 博士）")
+    return None, f"看不懂这个学历「{value}」（可写 不限 / 大专 / 本科 / 硕士 / 博士）"
 
 
-def parse_education_range(values) -> tuple[tuple[str, str] | None, list[str]]:
-    """解析 `/学历 最低 最高` 的参数。
+def education_from_config(cfg) -> str:
+    """config.toml 里的学历（单个档位）；兼容旧的 education_min/max、max_education。
 
-    返回 `((最低, 最高) | None, errors)`：
-      * `("", "")` 表示两项都不限；
-      * 传一个词时按「只看这一档」处理（最低 = 最高）；
-      * `None` = 没给出可用的值（调用方当「查看」或报错）。
-
-    两边都是空串 = 不按学历筛；只给一边时另一边为「不限」。
+    旧配置是区间时，优先取上限：新语义只有一个档位，上限最接近原来的「不超过」。
+    上限写着「不限」就返回空串（不按学历筛）。
     """
-    items = [str(v).strip() for v in (values or []) if str(v).strip()]
-    errors: list[str] = []
-    if not items:
-        return None, errors
-    if len(items) > 2:
-        return None, ["学历要写两个：/学历 最低 最高（只写一个 = 只看这一档）"]
-
-    if len(items) == 1:
-        raw_low = raw_high = items[0]
-    else:
-        raw_low, raw_high = items
-
-    bounds: list[str] = []
-    for role, raw in (("最低", raw_low), ("最高", raw_high)):
-        value = normalize_education(raw)
-        if value is None:
-            if looks_like_education(raw):
-                errors.append(
-                    f"「{raw}」是岗位要求的写法；学历写档位即可"
-                    "（不限 / 大专 / 本科 / 硕士 / 博士）")
-            else:
-                errors.append(f"看不懂{role}学历「{raw}」")
-            bounds.append("")
-        else:
-            bounds.append(value)
-    if errors:
-        return None, errors
-
-    low, high = bounds
-    if low and high and rank_of(low) > rank_of(high):
-        return None, [f"最低学历 {low} 不能高于最高学历 {high}"]
-    return (low, high), []
-
-
-def education_from_config(cfg) -> tuple[str, str]:
-    """config.toml 里的学历区间（兼容旧的单项 max_education）。"""
-    low = normalize_education(cfg.get("job_filter.education_min", ""),
-                              allow_above=True) or ""
-    high = normalize_education(
-        cfg.get("job_filter.education_max", "") or cfg.get("job_filter.max_education", ""),
-        allow_above=True) or ""
-    return low, high
+    raw = cfg.get("job_filter.education", "")
+    if raw is not None and str(raw).strip() != "":
+        return normalize_education(raw, allow_above=True) or ""
+    for key in ("education_max", "education_min", "max_education"):
+        raw = cfg.get(f"job_filter.{key}", "")
+        if raw is not None and str(raw).strip() != "":
+            return normalize_education(raw, allow_above=True) or ""
+    return ""
 
 
 def is_clear(text) -> bool:
@@ -304,20 +265,45 @@ def wage_problem(value: float | None) -> str:
 class Prefs:
     """QQ 上设定的投递偏好。
 
-    `education` 是 `(最低, 最高)`，空串 = 该边界不限；`None` = 没设过（按 config.toml）。
-    `min_wage` 的 `None` = 没设过，`0` = 明确不限。
+    `education`：`None` = 没设过（按 config.toml），`""` = 不限，其他 = 单个档位。
+    `min_wage`：`None` = 没设过，`0` = 明确不限。
     """
-    education: tuple[str, str] | None = None
+    education: str | None = None
     min_wage: float | None = None
 
-    def with_education(self, low: str, high: str) -> "Prefs":
-        return Prefs(education=(low, high), min_wage=self.min_wage)
+    def with_education(self, value: str) -> "Prefs":
+        return Prefs(education=value, min_wage=self.min_wage)
 
     def with_wage(self, min_wage: float) -> "Prefs":
         return Prefs(education=self.education, min_wage=min_wage)
 
     def is_empty(self) -> bool:
         return self.education is None and self.min_wage is None
+
+
+def _migrate_education(raw) -> str | None:
+    """兼容旧版存盘格式：字符串 / (最低, 最高) 数组。
+
+    旧版是「区间」；新版只保留一个档位，优先取上限（最接近原来的「不超过」）。
+    空串是「明确不限」，不能当成「没设置」丢掉。
+    """
+    if isinstance(raw, str):
+        if raw.strip() == "":
+            return ""
+        return normalize_education(raw)
+    if isinstance(raw, (list, tuple)):
+        values: list[str] = []
+        for item in raw:
+            if isinstance(item, str) and item.strip() == "":
+                values.append("")
+                continue
+            got = normalize_education(item)
+            if got is not None:
+                values.append(got)
+        if not values:
+            return None
+        return max(values, key=rank_of)
+    return None
 
 
 def load_prefs(path) -> Prefs:
@@ -328,19 +314,7 @@ def load_prefs(path) -> Prefs:
     if not isinstance(data, dict):
         return Prefs()
 
-    education: tuple[str, str] | None = None
-    raw_education = data.get("education")
-    if isinstance(raw_education, str):
-        # 旧格式（上一版只存了「我的最高学历」）：按「最低不限、最高=它」迁移
-        low = ""
-        high = normalize_education(raw_education)
-        if high is None:
-            high = ""
-        education = (low, high)
-    elif isinstance(raw_education, (list, tuple)) and len(raw_education) >= 2:
-        low = normalize_education(raw_education[0])
-        high = normalize_education(raw_education[1])
-        education = (low or "", high or "")
+    education = _migrate_education(data.get("education"))
 
     min_wage: float | None = None
     raw_wage = data.get("min_wage")
@@ -362,7 +336,7 @@ def save_prefs(path, prefs: Prefs) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps({
-        "education": list(prefs.education) if prefs.education is not None else None,
+        "education": prefs.education,
         "min_wage": prefs.min_wage,
     }, ensure_ascii=False, indent=2)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -374,12 +348,11 @@ def save_prefs(path, prefs: Prefs) -> None:
 #  给 QQ 回复用的文字
 # ---------------------------------------------------------------------------
 def describe(prefs: Prefs) -> str:
-    """两行：学历区间、日薪。没设过的项说明按 config.toml。"""
+    """两行：学历、日薪。没设过的项说明按 config.toml。"""
     if prefs.education is None:
         education = "未设置（按 config.toml）"
     else:
-        low, high = prefs.education
-        education = f"{education_text(low, high)}（QQ 设定）"
+        education = f"{prefs.education or '不限'}（QQ 设定）"
 
     if prefs.min_wage is None:
         wage = "未设置（按 config.toml）"
@@ -398,7 +371,7 @@ def status_line(prefs: Prefs) -> str:
     if prefs.education is None:
         education = "config"
     else:
-        education = education_text(*prefs.education)
+        education = prefs.education or "不限"
     if prefs.min_wage is None:
         wage = "config"
     elif not prefs.min_wage:

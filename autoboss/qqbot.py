@@ -43,11 +43,10 @@ HELP = """🤖 auto_boss 指令（以 / 开头）
 /演练              只筛选不发送（默认 5 条）
 /演练 5            只筛选不发送，最多 5 条
 
-🎓 学历（筛的是岗位要求的学历区间，写进 BOSS 搜索地址由平台筛）
+🎓 学历（写进 BOSS 搜索地址的 degree 参数，由平台筛）
 /学历              看当前设置
-/学历 不限 硕士    只要学历要求在不限–硕士之间的岗位（不限 = 该边界不设限）
-/学历 本科         只写一个 = 只看要求本科的岗位
-/学历 不限 不限    取消学历限制（设了区间后「学历不限」的岗位会被排除）
+/学历 硕士         只看要求硕士的岗位（可选 不限 / 大专 / 本科 / 硕士 / 博士）
+/学历 不限         不限制学历（设了具体档位后「学历不限」的岗位会被平台排除）
 
 💰 薪资（BOSS 没有日薪档，日薪下限由程序按卡片薪资精确比较）
 /薪资              看当前设置
@@ -317,37 +316,35 @@ class QQBot:
 
     @staticmethod
     def prefs_help() -> str:
-        return ("学历写两个档位：最低 最高（不限 / 大专 / 本科 / 硕士 / 博士），"
-                "只写一个 = 只看这一档；薪资写日薪 300，或 月薪8000、8k。"
+        return ("学历一次写一个档位（不限 / 大专 / 本科 / 硕士 / 博士），"
+                "写「不限」= 不按学历筛；薪资写日薪 300，或 月薪8000、8k。"
                 "设定存在 .qq_prefs.json，删掉它就全部回到 config.toml。")
 
     def education_cmd(self, rest: list[str]) -> str:
-        """「/学历 [最低 最高]」：不带参数 = 查看，带了 = 设定。"""
+        """「/学历 [档位]」：不带参数 = 查看，带了 = 设定一个档位。"""
         prefs = self._prefs()
         if not rest:
-            return ("🎓 当前学历要求\n" + preferences.describe(prefs)
-                    + "\n\n" + self.prefs_help())
-        bounds, errors = preferences.parse_education_range(rest)
-        if errors:
-            return "❌ " + "；".join(errors) + "\n" + self.prefs_help()
-        if bounds is None:
-            return self.prefs_help()
-        low, high = bounds
-        prefs = prefs.with_education(low, high)
+            return (preferences.describe(prefs) + "\n\n" + self.prefs_help())
+        if len(rest) > 1:
+            return ("❌ 一次只写一个学历档位，例如 /学历 硕士；"
+                    "不限制写 /学历 不限。\n" + self.prefs_help())
+        value, error = preferences.parse_education(rest[0])
+        if value is None:
+            return f"❌ {error}\n{self.prefs_help()}"
+        prefs = prefs.with_education(value)
         self._save_prefs(prefs)
-        note = "\n（两项都不限 = 取消学历限制）" if not low and not high else ""
-        degree = preferences.degree_param(low, high)
-        url_line = f"\nBOSS URL 参数：degree={degree}" if degree else ""
-        return (f"✅ 已设定学历区间：{preferences.education_text(low, high)}"
-                f"{note}{url_line}\n\n" + preferences.describe(prefs))
+        degree = preferences.degree_param(value)
+        url_line = (f"\nBOSS URL 参数：degree={degree}" if degree
+                    else "\n（不带 degree 参数，不按学历筛）")
+        return (f"✅ 已设定学历：{value or '不限'}{url_line}\n\n"
+                + preferences.describe(prefs))
 
     def wage_cmd(self, raw: str) -> str:
         """「/薪资 [日薪]」：不带参数 = 查看，带了 = 设定。"""
         prefs = self._prefs()
         text = raw.strip()
         if not text:
-            return ("💰 当前学历 / 薪资设置\n" + preferences.describe(prefs)
-                    + "\n\n" + self.prefs_help())
+            return (preferences.describe(prefs) + "\n\n" + self.prefs_help())
         if preferences.is_clear(text):
             prefs = prefs.with_wage(0.0)
             self._save_prefs(prefs)
@@ -371,7 +368,7 @@ class QQBot:
         if rest:
             if len(rest) > 1 or not rest[0].isdigit():
                 return ("❌ 「/投递」只接受条数，例如 /投递 10。\n"
-                        "关键词用 /关键词，学历用 /学历 最低 最高，薪资用 /薪资 300；"
+                        "关键词用 /关键词，学历用 /学历 硕士，薪资用 /薪资 300；"
                         "发 /配置 看当前设置。")
             limit = int(rest[0])
             if limit <= 0:
@@ -394,13 +391,13 @@ class QQBot:
         lines = ["🔧 当前投递配置"]
 
         if prefs.education is None:
-            low, high = preferences.education_from_config(cfg)
+            education = preferences.education_from_config(cfg)
             edu_src = "config.toml"
         else:
-            low, high = prefs.education
+            education = prefs.education
             edu_src = "QQ 设定"
-        lines.append(f"🎓 学历要求：{preferences.education_text(low, high)}（{edu_src}）")
-        degree = preferences.degree_param(low, high)
+        lines.append(f"🎓 学历要求：{education or '不限'}（{edu_src}）")
+        degree = preferences.degree_param(education)
         if degree:
             lines.append(f"   BOSS URL：degree={degree}")
 
@@ -445,7 +442,7 @@ class QQBot:
         lines.append("")
         lines.append("注：学历由 BOSS 搜索地址的 degree 参数筛；BOSS 薪资档位只有月薪，"
                      "日薪下限由程序按卡片薪资精确比较。")
-        lines.append("改条件：/学历 最低 最高 · /薪资 300 · /关键词 词1 词2")
+        lines.append("改条件：/学历 硕士 · /薪资 300 · /关键词 词1 词2")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -545,10 +542,8 @@ class QQBot:
             # 竖线分隔：关键词里可能带空格或逗号，用参数传更稳
             args += ["--keywords", "|".join(words)]
         if prefs.education is not None:
-            # 「不限」也要显式传：它要盖住 config.toml 里的学历区间
-            low, high = prefs.education
-            args += ["--education-min", low or "不限",
-                     "--education-max", high or "不限"]
+            # 「不限」也要显式传：它要盖住 config.toml 里的学历
+            args += ["--education", prefs.education or "不限"]
         if prefs.min_wage is not None:
             args += ["--min-wage", f"{prefs.min_wage:g}"]
 
@@ -565,7 +560,7 @@ class QQBot:
         if words:
             desc += f"，只搜 {len(words)} 个关键词"
         if prefs.education is not None:
-            desc += "，学历" + preferences.education_text(*prefs.education)
+            desc += "，学历" + (prefs.education or "不限")
         if prefs.min_wage is not None:
             desc += "，日薪" + (f"≥{prefs.min_wage:g}" if prefs.min_wage else "不限")
         with self._lock:

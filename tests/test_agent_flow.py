@@ -332,9 +332,8 @@ def test_agent_applies_education_and_wage_overrides():
         # 卡片上读不出学历：不拦（和城市读不到不拦一致）
         {**base, "title": "Agent实习生", "company": "D", "salary": "600元/天"},
     ]}
-    with agent_env([scene] * 3, education=("", "本科"), min_wage=500) as (agent, page, store, vision, _):
-        check("学历下限为空", agent.rules.education_min, "")
-        check("学历上限覆盖成 本科", agent.rules.education_max, "本科")
+    with agent_env([scene] * 3, education="本科", min_wage=500) as (agent, page, store, vision, _):
+        check("学历覆盖成 本科", agent.rules.education, "本科")
         check("日薪覆盖成 500", agent.rules.min_daily_wage, 500.0)
         agent._enter_source()
         titles = [j["title"] for j in agent._rank_targets(scene["jobs"])]
@@ -343,15 +342,13 @@ def test_agent_applies_education_and_wage_overrides():
 
 
 def test_degree_filter_in_url():
-    """学历区间要直接写进 BOSS 地址，并由 URL 识别筛选栏里已选中的学历。"""
+    """学历要直接写进 BOSS 地址，并由 URL 识别筛选栏里已选中的学历。"""
     silence()
-    with agent_env([], education=("", "硕士")) as (agent, page, store, vision, _):
-        check("degree 参数", agent.degree_param, "209,208,206,202,203,204")
-        check_true("base_url 带 degree",
-                   "degree=209,208,206,202,203,204" in agent.base_url)
+    with agent_env([], education="硕士") as (agent, page, store, vision, _):
+        check("degree 参数", agent.degree_param, "204")
+        check_true("base_url 带 degree", "degree=204" in agent.base_url)
         agent._start_source("search", "大模型算法")
-        check_true("搜索来源也带 degree",
-                   "degree=209,208,206,202,203,204" in agent.base_url)
+        check_true("搜索来源也带 degree", "degree=204" in agent.base_url)
 
         # URL 里已经带了学历，筛选栏显示「学历要求(1)」不算误点
         def fake_eval(expr, timeout=20.0):
