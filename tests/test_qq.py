@@ -274,6 +274,7 @@ def test_bot_education_range_and_salary_commands():
 
         reply = bot.handle("学历 本科 硕士")
         check_true("设定学历区间成功", "已设定学历区间" in reply)
+        check_true("回复里带 BOSS degree 参数", "degree=203,204" in reply)
         check("学历区间已保存", bot._prefs().education, ("本科", "硕士"))
         check_true("能查看设置", "本科 – 硕士" in bot.handle("学历"))
 
@@ -324,6 +325,8 @@ def test_bot_config_command():
         bot.handle("关键词 大模型算法 Agent")
         text = bot.handle("配置")
         check_true("显示 QQ 设定的学历", "不限 – 硕士（QQ 设定）" in text)
+        check_true("显示 BOSS degree 参数",
+                   "degree=209,208,206,202,203,204" in text)
         check_true("显示 QQ 设定的薪资",
                    "≥300 元/天（区间取中位）（QQ 设定）" in text)
         check_true("显示 2 个关键词", "2 个（QQ 设定）" in text)

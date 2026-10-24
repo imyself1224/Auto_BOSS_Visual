@@ -147,7 +147,9 @@ _EDU_WORDS_RE = re.compile(
 def job_education(job: dict) -> str:
     """卡片上写的**岗位学历要求**，规范名；读不到返回空串。
 
-    首选视觉模型单独给的 `education` 字段，其次看标签行，最后在职位标题里找。
+    主要看标签行（视觉模型本来就要读标签判断实习），其次职位标题。
+    旧版提示词可能给过单独的 `education` 字段，这里仍兼容；现在学历主要由
+    BOSS 搜索地址的 degree 参数筛选，这一层只是兜底复核，不额外花模型调用。
     明确写着「学历不限」时返回「不限」（按最低档算），读不到返回空串（不拦）。
     """
     raw = job.get("education")
@@ -229,10 +231,10 @@ def evaluate(job: dict, rules: Rules) -> Verdict:
     else:
         reasons.append("实习岗")
 
-    # ---- 硬条件 2：学历区间（岗位要求的学历要落在 [最低, 最高] 内）----
-    # 读不出学历的卡片放行 —— 和城市读不到不拦是同一个原则。
-    # 卡片写着「学历不限」按最低档（rank 0）算，所以最低学历设成本科时会把它筛掉；
-    # 想保留就写 /学历 不限 硕士。
+    # ---- 硬条件 2：学历区间（兜底复核）----
+    # 学历主要由 BOSS 搜索地址的 degree 参数筛，这里只是拿卡片标签复核一遍
+    # （标签本来就要读，不额外花模型调用）。读不出学历的放行 —— 和城市读不到不拦一致。
+    # 「学历不限」按最低档（rank 0）算，和 BOSS 的 URL 行为一致。
     low = preferences.rank_of(rules.education_min)
     high = preferences.rank_of(rules.education_max) or 99
     if hard_fail is None and (low or high < 99):

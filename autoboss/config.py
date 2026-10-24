@@ -154,18 +154,28 @@ class Config:
         取消限制；删掉这个文件就全部回到 config.toml。"""
         return PROJECT_ROOT / ".qq_prefs.json"
 
-    def search_url(self, page: int = 1, query: str | None = None) -> str:
+    def search_url(self, page: int = 1, query: str | None = None,
+                   degree: str = "") -> str:
+        """职位搜索地址。
+
+        `degree` 是 BOSS 原生的学历筛选参数（逗号分隔的代码，如 "203,204"）：
+        直接写进地址，筛选由平台完成，不需要模型读学历、也不用点筛选栏。
+        """
         from urllib.parse import quote
         q = quote(str(self.get("search.query", "") if query is None else query))
         # 用 /web/geek/jobs（复数）：实测 /job 会被 302 到 /jobs，直接写复数省一次跳转
         # 求职类型直接写进地址（实习 = jobType=1902，实测点筛选器后地址里就是它）。
         # 这样每个来源一打开就是实习池，不用再去点筛选栏 —— 少点几下，也少几次模型调用。
         job_type = str(self.get("search.job_type", "") or "")
-        return (
+        url = (
             "https://www.zhipin.com/web/geek/jobs"
             f"?query={q}&city={self.get('search.city')}&page={page}"
             + (f"&jobType={job_type}" if job_type else "")
         )
+        degree = str(degree or "").strip()
+        if degree:
+            url += f"&degree={quote(degree, safe=',')}"
+        return url
 
 
 def load(path: Path = CONFIG_PATH) -> Config:

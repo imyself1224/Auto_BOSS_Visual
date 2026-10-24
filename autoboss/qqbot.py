@@ -43,13 +43,13 @@ HELP = """🤖 auto_boss 指令（以 / 开头）
 /演练              只筛选不发送（默认 5 条）
 /演练 5            只筛选不发送，最多 5 条
 
-🎓 学历（筛的是岗位要求的学历区间）
+🎓 学历（筛的是岗位要求的学历区间，写进 BOSS 搜索地址由平台筛）
 /学历              看当前设置
 /学历 不限 硕士    只要学历要求在不限–硕士之间的岗位（不限 = 该边界不设限）
 /学历 本科         只写一个 = 只看要求本科的岗位
-/学历 不限 不限    取消学历限制
+/学历 不限 不限    取消学历限制（设了区间后「学历不限」的岗位会被排除）
 
-💰 薪资
+💰 薪资（BOSS 没有日薪档，日薪下限由程序按卡片薪资精确比较）
 /薪资              看当前设置
 /薪资 300          设定日薪下限；也可写 月薪8000、8k，自动折成日薪
 /薪资 不限         不按薪资筛
@@ -336,8 +336,10 @@ class QQBot:
         prefs = prefs.with_education(low, high)
         self._save_prefs(prefs)
         note = "\n（两项都不限 = 取消学历限制）" if not low and not high else ""
-        return (f"✅ 已设定学历区间：{preferences.education_text(low, high)}{note}\n\n"
-                + preferences.describe(prefs))
+        degree = preferences.degree_param(low, high)
+        url_line = f"\nBOSS URL 参数：degree={degree}" if degree else ""
+        return (f"✅ 已设定学历区间：{preferences.education_text(low, high)}"
+                f"{note}{url_line}\n\n" + preferences.describe(prefs))
 
     def wage_cmd(self, raw: str) -> str:
         """「/薪资 [日薪]」：不带参数 = 查看，带了 = 设定。"""
@@ -398,6 +400,9 @@ class QQBot:
             low, high = prefs.education
             edu_src = "QQ 设定"
         lines.append(f"🎓 学历要求：{preferences.education_text(low, high)}（{edu_src}）")
+        degree = preferences.degree_param(low, high)
+        if degree:
+            lines.append(f"   BOSS URL：degree={degree}")
 
         if prefs.min_wage is None:
             wage = float(cfg.get("job_filter.min_daily_wage", 0) or 0)
@@ -438,6 +443,8 @@ class QQBot:
             lines.append("🎛 平台筛选：" + "、".join(pairs))
 
         lines.append("")
+        lines.append("注：学历由 BOSS 搜索地址的 degree 参数筛；BOSS 薪资档位只有月薪，"
+                     "日薪下限由程序按卡片薪资精确比较。")
         lines.append("改条件：/学历 最低 最高 · /薪资 300 · /关键词 词1 词2")
         return "\n".join(lines)
 

@@ -342,6 +342,30 @@ def test_agent_applies_education_and_wage_overrides():
         check("过滤计数 = 2", agent.stats["filtered"], 2)
 
 
+def test_degree_filter_in_url():
+    """学历区间要直接写进 BOSS 地址，并由 URL 识别筛选栏里已选中的学历。"""
+    silence()
+    with agent_env([], education=("", "硕士")) as (agent, page, store, vision, _):
+        check("degree 参数", agent.degree_param, "209,208,206,202,203,204")
+        check_true("base_url 带 degree",
+                   "degree=209,208,206,202,203,204" in agent.base_url)
+        agent._start_source("search", "大模型算法")
+        check_true("搜索来源也带 degree",
+                   "degree=209,208,206,202,203,204" in agent.base_url)
+
+        # URL 里已经带了学历，筛选栏显示「学历要求(1)」不算误点
+        def fake_eval(expr, timeout=20.0):
+            return '["学历要求"]' if '"学历要求"' in expr else "[]"
+
+        page.evaluate = fake_eval
+        page.url = agent.base_url
+        check("学历筛选不算 stray", agent._stray_filters(), [])
+        agent.degree_param = ""
+        page.url = "https://www.zhipin.com/web/geek/jobs?city=101010100"
+        check_true("没有 URL 学历时仍能发现误点的学历筛选",
+                   "学历要求" in agent._stray_filters())
+
+
 def test_daily_cap_stops():
     silence()
     job = {"title": "推荐算法实习生", "company": "B", "salary": "400元/天",
@@ -1038,6 +1062,7 @@ def test_card_title_paren_width_mismatch():
 if __name__ == "__main__":
     for fn in (test_filtering_and_ordering, test_filtered_not_repeated,
                test_agent_applies_education_and_wage_overrides,
+               test_degree_filter_in_url,
                test_daily_cap_stops, test_dry_run_never_clicks,
                test_card_title_paren_width_mismatch,
                test_platform_quota_text_stops_run,

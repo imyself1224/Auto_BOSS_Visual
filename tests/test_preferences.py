@@ -110,6 +110,15 @@ def test_wage_parsing():
 # ===========================================================================
 #  持久化
 # ===========================================================================
+def test_degree_param():
+    check("本科+硕士", p.degree_param("本科", "硕士"), "203,204")
+    check("不限–硕士", p.degree_param("", "硕士"), "209,208,206,202,203,204")
+    check("本科–不限", p.degree_param("本科", ""), "203,204,205")
+    check("单档", p.degree_param("本科", "本科"), "203")
+    check("全不限 = 不带参数", p.degree_param("", ""), "")
+    check("「不限」写法也认", p.degree_param("不限", "硕士"), "209,208,206,202,203,204")
+
+
 def test_prefs_roundtrip():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / ".qq_prefs.json"
@@ -170,8 +179,8 @@ def test_with_and_describe():
 
 
 if __name__ == "__main__":
-    for fn in (test_normalize_education, test_education_range, test_wage_parsing,
-               test_prefs_roundtrip, test_with_and_describe):
+    for fn in (test_normalize_education, test_education_range, test_degree_param,
+               test_wage_parsing, test_prefs_roundtrip, test_with_and_describe):
         try:
             fn()
         except Exception as exc:  # noqa: BLE001

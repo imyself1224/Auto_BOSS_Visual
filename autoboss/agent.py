@@ -73,8 +73,6 @@ class GreetAgent:
         self.keywords = kw.split_keywords(keywords) if keywords else []
         if self.keywords:
             self.source_mode = "search"
-        self.base_url = cfg.search_url(1)
-        self.feed_url = self.base_url        # 进入推荐流后会被更新成实际地址
         self._scroll_pos = 0                 # 推荐流是无限滚动，用它渐进下探
         self._bottom_hits = 0                # 连续几次滚不动了（翻到页脚）
         self._filtered_seen: set[str] = set()
@@ -140,6 +138,13 @@ class GreetAgent:
                 preferences.normalize_education(high, allow_above=True) or "")
         if min_wage is not None:
             self.rules.min_daily_wage = float(min_wage)
+        # 学历筛选直接写进 BOSS 搜索地址（degree=203,204），由平台完成 ——
+        # 不让模型读学历、也不用点筛选栏。卡片标签只做兜底复核（见 filters.evaluate）。
+        self.degree_param = preferences.degree_param(
+            self.rules.education_min, self.rules.education_max)
+        # 学历参数要在这里才能拼：rules 是上面几行才最终确定的
+        self.base_url = cfg.search_url(1, degree=self.degree_param)
+        self.feed_url = self.base_url        # 进入推荐流后会被更新成实际地址
 
         # 求职者画像（外接知识库）—— 判断岗位「能不能投、先投谁」的唯一依据。
         # 它就是一个你自己维护的 markdown 文件，程序只读、从不改写。
@@ -267,7 +272,10 @@ class GreetAgent:
     def _start_source(self, kind: str, query: str):
         """切到一个新来源：地址、滚动位置、筛选器状态都从头来。"""
         self.source_mode = kind
-        self.base_url = self.cfg.search_url(1, query) if kind == "search" else self.cfg.search_url(1)
+        if kind == "search":
+            self.base_url = self.cfg.search_url(1, query, degree=self.degree_param)
+        else:
+            self.base_url = self.cfg.search_url(1, degree=self.degree_param)
         self._expect_tab = query if kind == "expect" else ""
         self._source_ok = True
         self.feed_url = self.base_url
@@ -320,6 +328,8 @@ class GreetAgent:
         ]
         if self.boss_filters:
             lines.insert(2, f"  平台筛选：{self._filters_desc()}")
+        if self.degree_param:
+            lines.insert(2, f"  学历筛选：BOSS URL degree={self.degree_param}")
         self.log("\n" + "\n".join(lines))
 
         for n, (kind, query) in enumerate(sources, 1):
@@ -765,9 +775,20 @@ class GreetAgent:
             return False
         return f"jobType={job_type}" in (self.page.current_url() or "")
 
+    def _url_filter_names(self) -> set[str]:
+        """已经写进 URL、所以在筛选栏上出现也不算「多出来的筛选」。"""
+        names: set[str] = set()
+        if self.degree_param:
+            names.add("学历要求")
+        job_type = str(self.cfg.get("search.job_type", "") or "")
+        if job_type and self.page is not None:
+            if f"jobType={job_type}" in (self.page.current_url() or ""):
+                names.add("求职类型")
+        return names
+
     def _stray_filters(self) -> list[str]:
         """筛选栏上被选中、但不在 boss_filters 配置里的筛选器（按页面文字查，不花模型调用）。"""
-        wanted = {name for name, _ in self.boss_filters}
+        wanted = {name for name, _ in self.boss_filters} | self._url_filter_names()
         names = [n for n in FILTER_NAMES if n not in wanted]
         expr = ("(function(ns){var t=document.body?document.body.innerText:'';"
                 "return JSON.stringify(ns.filter(function(n){"

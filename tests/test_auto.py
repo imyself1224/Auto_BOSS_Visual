@@ -132,6 +132,19 @@ def test_start_notice_lists_keywords():
     check_true("回落到 config 的日薪", "≥300 元/天" in text)
 
 
+def test_degree_url_param():
+    """学历区间要拼成 BOSS 搜索地址的 degree 参数（平台筛，不花模型调用）。"""
+    from autoboss import config as cfgmod
+    cfg = cfgmod.load()
+    cfg._raw["search"] = {"query": "算法工程师", "city": "101010100",
+                          "job_type": "1902"}
+    url = cfg.search_url(1, "大模型算法", degree="203,204")
+    check_true("URL 带 degree", "degree=203,204" in url)
+    check_true("URL 仍带 jobType", "jobType=1902" in url)
+    check_true("URL 仍带关键词", "%E5%A4%A7%E6%A8%A1%E5%9E%8B" in url)
+    check_true("不设学历时没有 degree", "degree=" not in cfg.search_url(1, "大模型算法"))
+
+
 def test_cli_education_and_wage_args():
     check("两个档位", run._cli_education("本科", "硕士"), ("本科", "硕士"))
     check("不限 → 空串（要盖住 config）", run._cli_education("不限", "本科"),
@@ -185,7 +198,8 @@ def test_notify_start_sends_to_qq():
 if __name__ == "__main__":
     for fn in (test_restarts_until_quota, test_captcha_not_restarted, test_dry_pool_not_restarted,
                test_gives_up_after_max_restarts, test_start_notice_lists_keywords,
-               test_cli_education_and_wage_args, test_notify_start_sends_to_qq):
+               test_degree_url_param, test_cli_education_and_wage_args,
+               test_notify_start_sends_to_qq):
         try:
             fn()
         except Exception as exc:  # noqa: BLE001

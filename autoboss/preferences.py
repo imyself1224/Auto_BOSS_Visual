@@ -8,10 +8,10 @@
 
 语义：
 
-* **学历区间筛的是「岗位要求的学历」**：要求落在 [最低, 最高] 之间才投。
-  `不限` = 该边界不设限；卡片上读不出学历的照旧放行（宁可漏掉不误杀）。
-  卡片明确写「学历不限」按最低档算 —— 想连它一起保留就写 `/学历 不限 硕士`。
+* **学历区间**会拼成 BOSS 搜索地址的 `degree` 参数（如 `203,204`），由平台在 URL 层筛，
+  不花模型调用；设了区间后 BOSS 会排除写着「学历不限」的岗位（平台原生行为）。
 * **薪资 = 日薪下限**，口径和 `[job_filter].min_daily_wage` 完全一致（区间取中位数）。
+  BOSS 的薪资档位只有月薪、没有日薪档，所以这项由程序按卡片薪资精确比较。
   写月薪（`月薪8000` / `8k`）会按 21.75 个工作日折成日薪。
 """
 from __future__ import annotations
@@ -27,6 +27,13 @@ from pathlib import Path
 # 档位由低到高。数字只用于比较学历高低，不对外展示。
 EDUCATION_LEVELS = ("初中及以下", "中专/中技", "高中", "大专", "本科", "硕士", "博士")
 EDUCATION_RANK = {name: i + 1 for i, name in enumerate(EDUCATION_LEVELS)}
+
+# BOSS 搜索 URL 里 degree 参数的取值（/wapi/zpgeek/pc/all/filter/conditions.json）。
+# 多个档位用逗号连接，实测 degree=203,204 只返回本科和硕士。
+DEGREE_CODES = {
+    "初中及以下": "209", "中专/中技": "208", "高中": "206",
+    "大专": "202", "本科": "203", "硕士": "204", "博士": "205",
+}
 
 # 用户和 BOSS 卡片上的各种写法 → 规范名
 _EDU_ALIASES = {
@@ -113,6 +120,27 @@ def education_text(low: str = "", high: str = "") -> str:
     if low_t == high_t:
         return low_t
     return f"{low_t} – {high_t}"
+
+
+def degree_param(low: str = "", high: str = "") -> str:
+    """把学历区间换成 BOSS URL 的 `degree` 参数（逗号分隔）。
+
+    两边都不限时返回空串（不带 degree 参数）。
+    注意：一旦带上 degree，BOSS 会**排除掉写着「学历不限」的岗位** ——
+    这是它的原生筛选行为，没法在同一个请求里既限学历又保留「不限」。
+    """
+    low = normalize_education(low, allow_above=True) or ""
+    high = normalize_education(high, allow_above=True) or ""
+    if not low and not high:
+        return ""
+    low_rank = EDUCATION_RANK.get(low, 1) if low else 1
+    high_rank = (EDUCATION_RANK.get(high, len(EDUCATION_LEVELS))
+                 if high else len(EDUCATION_LEVELS))
+    if low_rank > high_rank:
+        return ""
+    return ",".join(
+        DEGREE_CODES[name] for name in EDUCATION_LEVELS
+        if low_rank <= EDUCATION_RANK[name] <= high_rank)
 
 
 def parse_education_range(values) -> tuple[tuple[str, str] | None, list[str]]:
