@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from . import preferences
+
 # 全角数字与常见全角符号归一化
 _FULLWIDTH = str.maketrans("０１２３４５６７８９．－～／", "0123456789.-~/")
 
@@ -135,6 +137,35 @@ def looks_like_internship(job: dict) -> bool:
     return _intern_evidence(job)
 
 
+# 标题里可能出现「本科及以上」「硕士优先」这类字样；长词优先，避免「本科」吃掉「本科及以上」。
+_EDU_WORDS_RE = re.compile(
+    "|".join(sorted(("初中及以下", "中专/中技", "本科", "硕士", "博士",
+                     "大专", "专科", "高中", "中专", "学士", "研究生"), key=len,
+                    reverse=True)))
+
+
+def job_education(job: dict) -> str:
+    """卡片上写的**岗位学历要求**，规范名；读不到返回空串。
+
+    首选视觉模型单独给的 `education` 字段，其次看标签行，最后在职位标题里找。
+    「学历不限」和读不到都返回空串 —— 两种情况都不该拦人。
+    """
+    raw = job.get("education")
+    if raw:
+        got = preferences.normalize_education(raw, allow_above=True)
+        if got is not None:
+            return got
+    tags = job.get("tags") or []
+    for tag in tags:
+        got = preferences.normalize_education(tag, allow_above=True)
+        if got is not None:
+            return got
+    m = _EDU_WORDS_RE.search(str(job.get("title") or ""))
+    if m:
+        return preferences.normalize_education(m.group(0), allow_above=True) or ""
+    return ""
+
+
 @dataclass
 class Rules:
     require_internship: bool = True
@@ -142,6 +173,10 @@ class Rules:
     work_days_per_month: float = 21.75
     allow_unparsable: bool = False
     require_city: str = "北京"
+    # 我自己的最高学历（如「本科」）。岗位要求的学历高于它就不投；
+    # 卡片上读不出学历的放行 —— 和城市读不到不拦是同一个原则。
+    # 空串 = 不按学历筛。
+    max_education: str = ""
     # 档位 → 排序分。模型把岗位跟求职者画像（resume/kb.md）对比后判一个档位
     # （最匹配 / 次匹配 / 可转投 / 不可用）。
     # **表里没有的档位一律不打招呼** —— 所以「不可用」不写进来即可。
@@ -190,11 +225,24 @@ def evaluate(job: dict, rules: Rules) -> Verdict:
     else:
         reasons.append("实习岗")
 
-    # ---- 硬条件 2：薪资下限 ----
+    # ---- 硬条件 2：学历（岗位要求高于我的最高学历就不投）----
+    # 读不出学历的卡片放行 —— 和城市读不到不拦是同一个原则。
+    if hard_fail is None and rules.max_education:
+        mine = preferences.rank_of(rules.max_education)
+        required = job_education(job)
+        if mine and preferences.rank_of(required) > mine:
+            hard_fail = f"要求{required}，高于你的学历{rules.max_education}"
+        elif required:
+            reasons.append(f"学历要求{required}")
+
+    # ---- 硬条件 3：薪资下限（min_daily_wage <= 0 表示「不限」）----
     wage = None
     if hard_fail is None:
         wage = parse_daily_wage(salary_text, rules.work_days_per_month)
-        if wage is None:
+        if rules.min_daily_wage <= 0:
+            # 「薪资不限」：读不出来也放行，但照旧解析 —— 后面的档位门槛还要用它
+            reasons.append("不限薪资" if wage is None else f"日薪 {wage}（不限）")
+        elif wage is None:
             if rules.allow_unparsable:
                 reasons.append(f"薪资无法解析，按容忍放行（{salary_text!r}）")
             else:
@@ -206,7 +254,7 @@ def evaluate(job: dict, rules: Rules) -> Verdict:
             else:
                 reasons.append(f"日薪 {wage}")
 
-    # ---- 硬条件 3：城市（读不到就不拦，推荐流本身就限定在城市）----
+    # ---- 硬条件 4：城市（读不到就不拦，推荐流本身就限定在城市）----
     if hard_fail is None and rules.require_city and location:
         if rules.require_city not in location:
             hard_fail = f"地点不是{rules.require_city}：{location}"

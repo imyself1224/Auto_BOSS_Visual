@@ -120,6 +120,41 @@ def test_start_notice_lists_keywords():
     check_true("指定关键词时不走推荐流", "推荐流" not in text)
     check_true("标明演练", "演练" in text)
 
+    # 学历 / 日薪：QQ 指令带上时要出现在开始通知里
+    text = run_mod._start_notice(cfg, ["大模型算法"], dry_run=False, limit=None,
+                                 education="本科", min_wage=500)
+    check_true("带上学历上限", "学历要求 ≤本科" in text)
+    check_true("带上日薪下限", "≥500 元/天" in text)
+
+    # 没指定时显示 config.toml 里真正生效的值
+    text = run_mod._start_notice(cfg, [], dry_run=False, limit=None)
+    check_true("回落到 config 的学历", "学历要求 不限" in text)
+    check_true("回落到 config 的日薪", "≥300 元/天" in text)
+
+
+def test_cli_education_and_wage_args():
+    check("不限 → 空串（要盖住 config）", run._cli_education("不限"), "")
+    check("本科", run._cli_education("本科"), "本科")
+    check("没传保持 None", run._cli_education(None), None)
+    check("日薪", run._cli_min_wage(300), 300.0)
+    check("0 = 不限", run._cli_min_wage(0), 0.0)
+    check("没传保持 None", run._cli_min_wage(None), None)
+
+    for bad in ("本科及以上", "火星"):
+        try:
+            run._cli_education(bad)
+        except SystemExit:
+            check(f"「{bad}」被拒绝", True, True)
+        else:
+            check(f"「{bad}」应当拒绝", False, True)
+
+    try:
+        run._cli_min_wage(99999)
+    except SystemExit:
+        check("离谱日薪被拒绝", True, True)
+    else:
+        check("离谱日薪应当拒绝", False, True)
+
 
 def test_notify_start_sends_to_qq():
     class Rec:
@@ -146,7 +181,7 @@ def test_notify_start_sends_to_qq():
 if __name__ == "__main__":
     for fn in (test_restarts_until_quota, test_captcha_not_restarted, test_dry_pool_not_restarted,
                test_gives_up_after_max_restarts, test_start_notice_lists_keywords,
-               test_notify_start_sends_to_qq):
+               test_cli_education_and_wage_args, test_notify_start_sends_to_qq):
         try:
             fn()
         except Exception as exc:  # noqa: BLE001

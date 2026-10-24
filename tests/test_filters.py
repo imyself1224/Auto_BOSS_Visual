@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from autoboss.filters import (  # noqa: E402
-    Rules, evaluate, looks_like_internship, parse_daily_wage,
+    Rules, evaluate, job_education, looks_like_internship, parse_daily_wage,
 )
 
 PASSED = 0
@@ -245,8 +245,62 @@ def test_evaluate():
                not any("优先区域" in r for r in vague.reasons))
 
 
+# ===========================================================================
+# 学历：只投要求不高于「我的最高学历」的岗位
+# ===========================================================================
+EDU_RULES = Rules(require_internship=True, min_daily_wage=300, require_city="北京",
+                  fit_scores={"最匹配": 3.0}, max_education="本科")
+
+
+def test_job_education():
+    check("显式 education 字段优先",
+          job_education({"education": "硕士", "tags": ["本科"]}), "硕士")
+    check("标签里的学历", job_education({"tags": ["4天/周", "本科"]}), "本科")
+    check("本科及以上按本科算",
+          job_education({"tags": ["学历：本科及以上"]}), "本科")
+    check("学历不限视作不拦", job_education({"tags": ["学历不限"]}), "")
+    check("读不到就是空", job_education({"tags": ["4天/周", "6个月"]}), "")
+    check("标题里的学历也能认",
+          job_education({"title": "大模型算法实习生（硕士及以上）"}), "硕士")
+
+
+def test_education_filter():
+    v = evaluate(_job(tags=["4天/周", "本科"]), EDU_RULES)
+    check_true("要求本科 = 我的学历，放行", v.ok)
+
+    v = evaluate(_job(tags=["4天/周", "大专"]), EDU_RULES)
+    check_true("要求大专低于本科，放行", v.ok)
+
+    v = evaluate(_job(tags=["4天/周", "硕士"]), EDU_RULES)
+    check("要求硕士高于本科，拒绝", v.ok, False)
+    check_true("理由写明学历不够", any("高于你的学历" in r for r in v.reasons))
+
+    v = evaluate(_job(education="博士"), EDU_RULES)
+    check("显式博士要求，拒绝", v.ok, False)
+
+    v = evaluate(_job(tags=["4天/周"]), EDU_RULES)
+    check_true("读不出学历时放行", v.ok)
+
+    v = evaluate(_job(tags=["4天/周", "硕士"]),
+                 Rules(require_internship=True, min_daily_wage=300, require_city="北京",
+                       fit_scores={"最匹配": 3.0}, max_education=""))
+    check_true("没设学历就不拦", v.ok)
+
+
+def test_salary_unlimited():
+    rules = Rules(require_internship=True, min_daily_wage=0, require_city="北京",
+                  fit_scores={"最匹配": 3.0})
+    v = evaluate(_job(salary="面议"), rules)
+    check_true("薪资不限时「面议」也放行", v.ok)
+    v = evaluate(_job(salary="100元/天"), rules)
+    check_true("薪资不限时低薪也放行", v.ok)
+    v = evaluate(_job(salary="150-200元/天"), RULES)
+    check("默认仍然拦低薪", v.ok, False)
+
+
 if __name__ == "__main__":
-    for fn in (test_wage, test_internship, test_evaluate):
+    for fn in (test_wage, test_internship, test_evaluate,
+               test_job_education, test_education_filter, test_salary_unlimited):
         fn()
     total = PASSED + len(FAILED)
     print(f"通过 {PASSED}/{total}")

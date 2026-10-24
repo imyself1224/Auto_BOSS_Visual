@@ -17,6 +17,9 @@ resume/*
 .browser.lock
 # QQ 上「/关键词 ...」设定的临时检索关键词
 .qq_keywords.txt
+# QQ 上「/学历 ...」「/薪资 ...」设定的筛选条件
+.qq_prefs.json
+.qq_prefs.json.tmp
 
 # SnowLuma（QQ 托管）：第三方程序 + 它的配置/登录数据，不上传
 SnowLuma/

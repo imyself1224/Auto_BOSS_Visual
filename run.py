@@ -9,6 +9,7 @@
     python run.py greet --auto    # 无人值守：实发、不确认、出错自动重启，投到平台额度用完
     python run.py greet --dry     # 强制演练（覆盖配置，QQ「演练」指令用它）
     python run.py greet --keywords "大模型算法 Agent"  # 只搜这几个词（QQ 指令也用它）
+    python run.py greet --education 本科 --min-wage 300  # 学历上限 / 日薪下限（QQ 指令也用它）
     python run.py stats           # 看历史记录
     python run.py bot             # QQ 机器人：推送投递结果、接收大号的遥控指令
 """
@@ -25,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from autoboss import config as cfgmod
 from autoboss import keywords as kwlib
+from autoboss import preferences
 from autoboss import prompts
 from autoboss.agent import GreetAgent
 from autoboss.browser import BrowserSession
@@ -90,6 +92,8 @@ def cmd_doctor(cfg, args):
     shown = "、".join(picked[:6]) + ("…" if len(picked) > 6 else "")
     print(f"  关键词      {len(picked)} 个：{shown or '（无）'}")
     print(f"  城市        {cfg.get('search.city')}")
+    print(f"  学历上限    {cfg.get('job_filter.max_education') or '不限'}")
+    print(f"  日薪下限    {cfg.get('job_filter.min_daily_wage')}")
     print(f"  视觉模型    {cfg.get('deepseek.vision_model')}")
     print(f"  今日上限    {cfg.get('limits.daily_cap')}")
     print(f"  dry_run     {cfg.get('safety.dry_run')}")
@@ -294,8 +298,26 @@ def _notify_end(notifier, cfg, kind: str, stats: dict, dry_run: bool,
     notifier.send(msg)
 
 
-def _start_notice(cfg, keywords, dry_run: bool, limit: int | None) -> str:
-    """任务开始前推给 QQ 的文字：这次到底搜哪些关键词。
+def _hard_filters_line(cfg, education: str | None = None,
+                       min_wage: float | None = None) -> str:
+    """任务开始推送里的「学历 / 日薪」这一行。
+
+    None 表示这次没指定，回落到 config.toml 的值 —— 推给大号的就是**真正生效**的条件。
+    """
+    if education is None:
+        education = str(cfg.get("job_filter.max_education", "") or "")
+    if min_wage is None:
+        min_wage = float(cfg.get("job_filter.min_daily_wage", 0) or 0)
+    education = preferences.normalize_education(education, allow_above=True) or ""
+    edu_text = f"≤{education}" if education else "不限"
+    wage_text = f"中位 ≥{min_wage:g} 元/天" if min_wage > 0 else "不限"
+    return f"🎓 学历要求 {edu_text} · 💰 日薪 {wage_text}"
+
+
+def _start_notice(cfg, keywords, dry_run: bool, limit: int | None,
+                  education: str | None = None,
+                  min_wage: float | None = None) -> str:
+    """任务开始前推给 QQ 的文字：这次到底搜哪些关键词、按什么条件筛。
 
     以前只有结束通知，开始时不说话 —— 搜「大模型算法」两屏就停的那次，
     人在 QQ 上完全看不出它到底试过哪些词（日志里才有）。
@@ -317,14 +339,42 @@ def _start_notice(cfg, keywords, dry_run: bool, limit: int | None) -> str:
         lines.append("🔎 没有配置检索关键词，只走推荐流")
     if extra:
         lines.append("另外还会走：" + " → ".join(extra))
+    lines.append(_hard_filters_line(cfg, education, min_wage))
     return "\n".join(lines)
 
 
-def _notify_start(notifier, cfg, keywords, dry_run: bool, limit: int | None):
-    text = _start_notice(cfg, keywords, dry_run, limit)
+def _notify_start(notifier, cfg, keywords, dry_run: bool, limit: int | None,
+                  education: str | None = None, min_wage: float | None = None):
+    text = _start_notice(cfg, keywords, dry_run, limit, education, min_wage)
     print("\n" + text + "\n")
     if notifier.enabled:
         notifier.send(text)
+
+
+def _cli_education(raw) -> str | None:
+    """`--education` 的解析。None = 这次没指定；「不限」规范成空串。"""
+    if raw is None:
+        return None
+    value = preferences.normalize_education(raw)
+    if value is None:
+        raise SystemExit(
+            f"看不懂 --education {raw}：可写 不限 / 大专 / 本科 / 硕士 / 博士"
+            "（填你自己的最高学历，不是「本科及以上」这种岗位要求写法）")
+    return value
+
+
+def _cli_min_wage(raw) -> float | None:
+    """`--min-wage` 的解析。None = 这次没指定；0 = 不限。"""
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise SystemExit(f"看不懂 --min-wage {raw}：写日薪数字，比如 300") from None
+    problem = preferences.wage_problem(value)
+    if problem:
+        raise SystemExit(problem)
+    return value
 
 
 def cmd_greet(cfg, args):
@@ -333,10 +383,15 @@ def cmd_greet(cfg, args):
 
     # QQ 指令 / --keywords 指定的关键词：只搜这些，覆盖 config 的 [search].queries
     words = kwlib.split_keywords(getattr(args, "keywords", "") or "")
+    # 学历 / 日薪：None = 用 config.toml；空串 / 0 = 明确不限
+    education = _cli_education(getattr(args, "education", None))
+    min_wage = _cli_min_wage(getattr(args, "min_wage", None))
     notifier = Notifier(cfg)
     if args.auto:
-        _notify_start(notifier, cfg, words, dry_run=False, limit=args.limit)
-        return _greet_auto(cfg, args, log_path, keywords=words)
+        _notify_start(notifier, cfg, words, dry_run=False, limit=args.limit,
+                      education=education, min_wage=min_wage)
+        return _greet_auto(cfg, args, log_path, keywords=words,
+                           education=education, min_wage=min_wage)
 
     live = args.live and not args.dry
     if live:
@@ -357,13 +412,14 @@ def cmd_greet(cfg, args):
     dry = True if args.dry else (False if live else bool(cfg.get("safety.dry_run", True)))
     # 开始通知放在 build() 之前：API key 配错、浏览器起不来时，
     # 大号也能先在 QQ 上看到"这次要搜哪些词"，再收到失败总结。
-    _notify_start(notifier, cfg, words, dry_run=dry, limit=args.limit)
+    _notify_start(notifier, cfg, words, dry_run=dry, limit=args.limit,
+                  education=education, min_wage=min_wage)
 
     run_id = new_run_id()
     client, store, vision, session = build(cfg, run_id)
     agent = GreetAgent(cfg, client, session, store, vision,
                        limit=args.limit, dry_run=dry, notifier=notifier,
-                       keywords=words)
+                       keywords=words, education=education, min_wage=min_wage)
     try:
         agent.run()
     finally:
@@ -375,7 +431,8 @@ def cmd_greet(cfg, args):
 
 def _greet_auto(cfg, args, log_path: Path | None = None,
                 max_restarts: int = 5, wait_sec: float = 60.0,
-                keywords: list[str] | None = None):
+                keywords: list[str] | None = None,
+                education: str | None = None, min_wage: float | None = None):
     """无人值守：实发，出错就等一会儿重启，直到额度用完 / 来源走完 / 需要人工。
 
     重启是安全的：已发的、已沟通过的都在去重库里，不会重复打招呼；
@@ -388,6 +445,11 @@ def _greet_auto(cfg, args, log_path: Path | None = None,
     # 中途改了 config.toml 的 queries 也只影响下一次任务（自动重启不算新任务）。
     words = (keywords if keywords is not None
              else kwlib.split_keywords(getattr(args, "keywords", "") or ""))
+    # 学历 / 日薪同理：这是「这一次任务」的条件，自动重启沿用同一份。
+    if education is None:
+        education = _cli_education(getattr(args, "education", None))
+    if min_wage is None:
+        min_wage = _cli_min_wage(getattr(args, "min_wage", None))
     while True:
         print(f"\n[auto] 第 {restarts + 1} 轮开始（{datetime.now():%H:%M:%S}）")
         cfg = cfgmod.load()        # 每轮重读配置，中途改了 config.toml 也能生效
@@ -400,7 +462,7 @@ def _greet_auto(cfg, args, log_path: Path | None = None,
             client, store, vision, session = build(cfg, run_id)
             agent = GreetAgent(cfg, client, session, store, vision,
                                limit=limit, dry_run=False, notifier=notifier,
-                               keywords=words)
+                               keywords=words, education=education, min_wage=min_wage)
             agent.run()
             kind = agent.stop_kind or "done"
         except KeyboardInterrupt:
@@ -525,6 +587,12 @@ def main():
     p_greet.add_argument("--keywords", default="", metavar="关键词",
                          help="只搜这些关键词（空格 / 逗号 / 顿号分隔），"
                               "覆盖 config 的 [search].queries，且不再走推荐流")
+    p_greet.add_argument("--education", default=None, metavar="学历",
+                         help="你的最高学历（不限 / 大专 / 本科 / 硕士 / 博士）；"
+                              "岗位要求高于它的不投。覆盖 config 的 max_education")
+    p_greet.add_argument("--min-wage", type=float, default=None, metavar="日薪",
+                         help="日薪下限（元/天），0 = 不限；"
+                              "覆盖 config 的 min_daily_wage")
 
     sub.add_parser("stats", help="查看历史记录")
 

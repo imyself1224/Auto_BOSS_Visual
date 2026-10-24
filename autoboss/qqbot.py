@@ -30,30 +30,51 @@ from websockets.exceptions import ConnectionClosed
 
 from . import config as cfgmod
 from . import keywords as kw
+from . import preferences
 from .lock import BrowserLock
 from .qq import Notifier, OneBot
 from .qqlaunch import QQLauncher
 
 HELP = """🤖 auto_boss 指令（以 / 开头）
-/投递                实发，投到平台额度用完，关键词用 config.toml 的
-/投递 10             实发，本次最多 10 条
-/投递 大模型算法 Agent  实发，**只搜**这几个关键词（空格/逗号/顿号分隔）
-/搜索 关键词          同「/投递 关键词」
-/演练 [关键词...] [5]  只筛选不发送（默认 5 条）
-/关键词              看当前检索关键词
-/关键词 大模型算法 Agent  设定下次任务的检索关键词（会一直沿用）
-/关键词 清空          恢复用 config.toml 里的 [search].queries
-/停止                让正在跑的任务收尾退出
-/状态                是否在跑、今日已投多少
-/今日                今天投了哪些岗位
-/统计                今日各状态计数 + 最近几次运行
-/日志 [20]           最近一份运行日志的末尾几行
-/重启                重启电脑（60 秒后执行）
-/关机                关闭电脑（60 秒后执行）
-/取消                撤销还没执行的重启 / 关机
-/帮助                显示本说明
 
-每次任务开始前会把本次要搜的关键词单独推给你。"""
+📮 投递
+/投递                    实发，投到平台额度用完，关键词用 config.toml 的
+/投递 10                 实发，本次最多 10 条
+/投递 大模型算法 Agent   实发，**只搜**这几个关键词（空格/逗号/顿号分隔）
+/投递 大模型算法 本科 300
+                         关键词 + 学历 + 日薪一起给：只搜大模型算法、
+                         学历要求不高于本科、日薪中位 ≥300
+/搜索 关键词             同「/投递 关键词」
+/演练 [关键词...] [5]    只筛选不发送（默认 5 条）
+
+🎓 学历 / 薪资（设定后一直沿用，下次 /投递 自动带上）
+/学历                    看当前学历设置
+/学历 本科               设定你的最高学历：岗位要求高于它的不投
+                         可选 不限 / 大专 / 本科 / 硕士 / 博士
+/薪资                    看当前日薪下限
+/薪资 300                设定日薪下限；也可写 月薪8000、8k，自动折成日薪
+/薪资 不限               不按薪资筛
+
+💡 数字怎么认：裸数字默认是**条数**（/投递 关键词 10）。
+   想改日薪写 薪资300 / 300元/天 / 300/天 / ≥300；
+   「/投递 关键词 本科 300」里和学历一起写的 300 也按日薪算。
+   写「10条」永远不会有歧义。
+   指令里写「学历不限」「薪资不限」可以一次清掉对应设置。
+
+/关键词                  看当前检索关键词
+/关键词 大模型算法 Agent  设定下次任务的检索关键词（会一直沿用）
+/关键词 清空              恢复用 config.toml 里的 [search].queries
+/停止                    让正在跑的任务收尾退出
+/状态                    是否在跑、今日已投多少、学历/薪资设置
+/今日                    今天投了哪些岗位
+/统计                    今日各状态计数 + 最近几次运行
+/日志 [20]               最近一份运行日志的末尾几行
+/重启                    重启电脑（60 秒后执行）
+/关机                    关闭电脑（60 秒后执行）
+/取消                    撤销还没执行的重启 / 关机
+/帮助                    显示本说明
+
+每次任务开始前会把本次要搜的关键词和筛选条件单独推给你。"""
 
 def cq_unescape(text: str) -> str:
     """raw_message 是 CQ 码字符串，[ ] , & 会被转义成 &#91; 之类，还原成原字符。"""
@@ -83,6 +104,8 @@ class QQBot:
         self.lock = BrowserLock(cfg.lock_path)
         # 「/关键词 ...」设下来、下次任务沿用的关键词（一行一个）
         self.keywords_path = cfg.qq_keywords_path
+        # 「/学历」「/薪资」「/投递 关键词 学历 日薪」设下来的筛选条件（JSON）
+        self.prefs_path = cfg.qq_prefs_path
         # 起子进程的入口。测试里换成桩，保证测试永远不会真的起一个实发任务
         self.popen = subprocess.Popen
         # 执行 shutdown 命令的入口。测试里换成桩，保证测试永远不会真的关机
@@ -214,11 +237,13 @@ class QQBot:
         if cmd in ("帮助", "help", "菜单", "?", "？"):
             return HELP
         if cmd in ("投递", "开始", "start", "搜索", "search"):
-            words, limit = self._words_and_limit(rest)
-            return self.start(live=True, limit=limit, keywords=words or None)
+            return self.task_cmd(rest, live=True)
         if cmd in ("演练", "dry"):
-            words, limit = self._words_and_limit(rest)
-            return self.start(live=False, limit=limit or 5, keywords=words or None)
+            return self.task_cmd(rest, live=False)
+        if cmd in ("学历", "education", "edu"):
+            return self.education_cmd(" ".join(rest))
+        if cmd in ("薪资", "日薪", "工资", "salary", "wage"):
+            return self.wage_cmd(" ".join(rest))
         if cmd in ("关键词", "检索词", "keywords", "kw"):
             return self.keyword_cmd(" ".join(rest))
         if cmd in ("停止", "stop"):
@@ -281,29 +306,90 @@ class QQBot:
             return default
 
     # ------------------------------------------------------------------
+    #  学历 / 薪资（和「/投递」合并：关键词、学历、日薪一条指令给全）
+    # ------------------------------------------------------------------
+    def _prefs(self) -> preferences.Prefs:
+        return preferences.load_prefs(self.prefs_path)
+
+    def _save_prefs(self, prefs: preferences.Prefs) -> None:
+        preferences.save_prefs(self.prefs_path, prefs)
+
+    @staticmethod
+    def prefs_help() -> str:
+        return ("学历可写 不限 / 大专 / 本科 / 硕士 / 博士；"
+                "薪资写日薪 300，或 月薪8000、8k（自动折成日薪）；"
+                "「不限」= 不按这项筛。设定存在 .qq_prefs.json，"
+                "删掉它就全部回到 config.toml。")
+
+    def education_cmd(self, raw: str) -> str:
+        """「/学历 [学历]」：不带参数 = 查看，带了 = 设定。"""
+        prefs = self._prefs()
+        # 多写几个词时只看第一个：「/学历 本科 硕士」按本科算
+        text = (raw.split() or [""])[0]
+        if not text:
+            return ("🎓 当前学历 / 薪资设置\n" + preferences.describe(prefs)
+                    + "\n\n" + self.prefs_help())
+        if preferences.is_clear(text):
+            prefs = preferences.Prefs(education="", min_wage=prefs.min_wage)
+            self._save_prefs(prefs)
+            return ("✅ 已取消学历限制，之后岗位要求多高都不拦\n\n"
+                    + preferences.describe(prefs))
+        value = preferences.normalize_education(text)
+        if value is None:
+            hint = ("\n「X及以上」是岗位要求的写法，这里填你自己的最高学历。"
+                    if preferences.looks_like_education(text) else "")
+            return f"❌ 看不懂这个学历「{text}」。{hint}\n{self.prefs_help()}"
+        prefs = preferences.Prefs(education=value, min_wage=prefs.min_wage)
+        self._save_prefs(prefs)
+        return (f"✅ 已设定学历：{value}（岗位要求高于它的不投）\n\n"
+                + preferences.describe(prefs))
+
+    def wage_cmd(self, raw: str) -> str:
+        """「/薪资 [日薪]」：不带参数 = 查看，带了 = 设定。"""
+        prefs = self._prefs()
+        text = raw.strip()
+        if not text:
+            return ("💰 当前学历 / 薪资设置\n" + preferences.describe(prefs)
+                    + "\n\n" + self.prefs_help())
+        if preferences.is_clear(text):
+            prefs = preferences.Prefs(education=prefs.education, min_wage=0.0)
+            self._save_prefs(prefs)
+            return "✅ 已取消日薪限制\n\n" + preferences.describe(prefs)
+        wage = preferences.parse_wage(text)
+        problem = preferences.wage_problem(wage)
+        if problem:
+            return f"❌ {problem}\n{self.prefs_help()}"
+        prefs = preferences.Prefs(education=prefs.education, min_wage=wage)
+        self._save_prefs(prefs)
+        return (f"✅ 已设定日薪下限：≥{wage:g} 元/天（区间取中位）\n\n"
+                + preferences.describe(prefs))
+
+    def task_cmd(self, rest: list[str], live: bool) -> str:
+        """「/投递 ...」「/演练 ...」：关键词、条数、学历、日薪一条指令给全。
+
+        `/投递 大模型算法 本科 300` = 只搜大模型算法、学历要求 ≤本科、日薪 ≥300。
+        """
+        args = preferences.parse_task_args(rest)
+        if args.errors:
+            return ("❌ " + "；".join(args.errors)
+                    + "\n例：/投递 大模型算法 本科 300   或   /投递 大模型算法 10")
+        prefs = self._prefs()
+        if args.touched:
+            prefs = prefs.merged(args)
+            self._save_prefs(prefs)
+        words = args.keywords or self.pending_keywords()
+        limit = args.limit
+        if not live and limit is None:
+            limit = 5                 # 「/演练」默认 5 条，和以前一致
+        reply = self.start(live=live, limit=limit, keywords=words or None, prefs=prefs)
+        if args.touched:
+            reply = ("✅ 已记住 " + preferences.status_line(prefs)
+                     + "（下次「/投递」沿用）\n" + reply)
+        return reply
+
+    # ------------------------------------------------------------------
     #  检索关键词
     # ------------------------------------------------------------------
-    def _words_and_limit(self, rest: list[str]):
-        """把「大模型算法 10」拆成 (关键词列表, 条数)。
-
-        关键词之间用空格、逗号、顿号、竖线都行；纯数字当条数（多个数字取最后一个）。
-        「/投递 大模型算法 10」= 只搜大模型算法、最多 10 条。
-        """
-        words: list[str] = []
-        limit = None
-        for token in rest:
-            for piece in kw.SPLIT_RE.split(token):
-                piece = piece.strip()
-                if not piece:
-                    continue
-                if piece.isdigit():
-                    # 纯数字是条数；「0」当没写，别把它当成关键词去搜
-                    if int(piece) > 0:
-                        limit = int(piece)
-                    continue
-                words.append(piece)
-        return kw.normalize(words), limit
-
     # 「/关键词 清空」等恢复 config 的写法
     _CLEAR_WORDS = ("清空", "清除", "默认", "重置", "恢复", "clear", "reset", "default")
 
@@ -360,6 +446,7 @@ class QQBot:
             lines.append("没有配置关键词，只走推荐流")
         if extra:
             lines.append("另外还会走：" + " → ".join(extra))
+        lines.append(preferences.status_line(self._prefs()))
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -373,7 +460,8 @@ class QQBot:
         """有不是 bot 启动的进程正在用浏览器（bat / 命令行 / login / doctor）。"""
         return not self._running() and self.lock.held_by_other()
 
-    def start(self, live: bool, limit: int | None, keywords: list[str] | None = None) -> str:
+    def start(self, live: bool, limit: int | None, keywords: list[str] | None = None,
+              prefs: preferences.Prefs | None = None) -> str:
         if self._running():
             return f"已经有任务在跑：{self.task_desc}\n要换任务先发「/停止」"
         if self._external_running():
@@ -382,6 +470,8 @@ class QQBot:
 
         # 这次只搜哪些词：指令里带的 > 之前「/关键词」设定的 > config.toml
         words = kw.normalize(keywords) if keywords else self.pending_keywords()
+        # 学历 / 日薪：None = 没设过（用 config.toml），"" / 0 = 明确不限
+        prefs = self._prefs() if prefs is None else prefs
 
         args = [sys.executable, str(self.run_py), "greet"]
         if live:
@@ -393,6 +483,11 @@ class QQBot:
         if words:
             # 竖线分隔：关键词里可能带空格或逗号，用参数传更稳
             args += ["--keywords", "|".join(words)]
+        if prefs.education is not None:
+            # 「不限」也要显式传：它要盖住 config.toml 里的 max_education
+            args += ["--education", prefs.education or "不限"]
+        if prefs.min_wage is not None:
+            args += ["--min-wage", f"{prefs.min_wage:g}"]
 
         self.cfg.stop_flag.unlink(missing_ok=True)
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
@@ -406,6 +501,10 @@ class QQBot:
                 + (f"，最多 {limit} 条" if limit else "，投到额度用完"))
         if words:
             desc += f"，只搜 {len(words)} 个关键词"
+        if prefs.education is not None:
+            desc += "，学历" + (prefs.education or "不限")
+        if prefs.min_wage is not None:
+            desc += "，日薪" + (f"≥{prefs.min_wage:g}" if prefs.min_wage else "不限")
         with self._lock:
             self.proc = proc
             self.task_desc = desc
@@ -416,7 +515,10 @@ class QQBot:
 
         warn = ("\n⚠️ 实发模式：会真实点「立即沟通」、消耗额度、触达 HR"
                 if live else "")
-        return (f"▶️ 已启动：{desc}（pid {proc.pid}）{warn}\n"
+        extra = ""
+        if not prefs.is_empty():
+            extra = "\n" + preferences.status_line(prefs)
+        return (f"▶️ 已启动：{desc}（pid {proc.pid}）{warn}{extra}\n"
                 "本次检索关键词马上推送给你\n每投出一条也会推送")
 
     def stop(self) -> str:
@@ -488,6 +590,7 @@ class QQBot:
         pending = self.pending_keywords()
         if pending:
             head += f"\n🔎 已设定 {len(pending)} 个关键词（发「/关键词」查看）"
+        head += "\n" + preferences.status_line(self._prefs())
         if self._external_running():
             return f"🏃 有任务在运行（不是从 QQ 启动的，比如 daily_greet.bat）\n{head}"
         if not self._running():

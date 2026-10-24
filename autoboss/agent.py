@@ -18,7 +18,7 @@ import random
 import time
 from pathlib import Path
 
-from . import filters, humanize, keywords as kw, overlay, prompts
+from . import filters, humanize, keywords as kw, overlay, preferences, prompts
 from .deepseek import DeepSeekError
 from .store import job_key
 
@@ -44,7 +44,8 @@ class StopRun(Exception):
 class GreetAgent:
     def __init__(self, cfg, client, session, store, vision, limit: int | None = None,
                  dry_run: bool | None = None, verbose: bool = True, notifier=None,
-                 keywords: list[str] | None = None):
+                 keywords: list[str] | None = None,
+                 education: str | None = None, min_wage: float | None = None):
         self.cfg = cfg
         # QQ 推送（autoboss.qq.Notifier）。None = 不推送
         self.notifier = notifier
@@ -115,6 +116,8 @@ class GreetAgent:
         self.rules = filters.Rules(
             require_internship=bool(cfg.get("job_filter.require_internship", True)),
             min_daily_wage=float(cfg.get("job_filter.min_daily_wage", 300)),
+            max_education=(preferences.normalize_education(
+                cfg.get("job_filter.max_education", ""), allow_above=True) or ""),
             work_days_per_month=float(cfg.get("job_filter.work_days_per_month", 21.75)),
             allow_unparsable=bool(cfg.get("job_filter.allow_unparsable", False)),
             require_city=str(cfg.get("job_filter.require_city", "北京")),
@@ -125,6 +128,13 @@ class GreetAgent:
             prefer_district_bonus=float(
                 cfg.get("job_filter.prefer_district_bonus", 1.0)),
         )
+        # QQ 指令 / `greet --education/--min-wage` 带来的临时筛选条件。
+        # None = 没指定（用 config 的）；"" / 0 = 明确「不限」，要盖住 config。
+        if education is not None:
+            self.rules.max_education = (
+                preferences.normalize_education(education, allow_above=True) or "")
+        if min_wage is not None:
+            self.rules.min_daily_wage = float(min_wage)
 
         # 求职者画像（外接知识库）—— 判断岗位「能不能投、先投谁」的唯一依据。
         # 它就是一个你自己维护的 markdown 文件，程序只读、从不改写。
@@ -282,13 +292,16 @@ class GreetAgent:
         sources = self._sources()
         src = " → ".join(kw.label(k, q) for k, q in sources)
         mode = "演练模式（不会真的发送）" if self.dry_run else "实发模式"
+        wage = (f"日薪中位 ≥{self.rules.min_daily_wage:.0f}"
+                if self.rules.min_daily_wage > 0 else "薪资不限")
+        education = (f" · 学历要求 ≤{self.rules.max_education}"
+                     if self.rules.max_education else "")
 
         lines = [
             "─" * 62,
             f"  职位来源：{src}",
             f"  硬性条件：{'实习' if self.rules.require_internship else '不限类型'}"
-            f" · 日薪中位 ≥{self.rules.min_daily_wage:.0f}"
-            f" · {self.rules.require_city}",
+            f" · {wage} · {self.rules.require_city}{education}",
             f"  投递档位：{'、'.join(self._tier_desc(t) for t in self.rules.fit_scores) or '—'}"
             f"（未列出的档位 = 不发）",
             f"  优先区域：{'、'.join(self.rules.prefer_districts) or '—'}",
@@ -849,6 +862,7 @@ class GreetAgent:
     def _why_category(reason: str) -> str:
         for key, label in (("不是实习", "不是实习"), ("日薪中位", "日薪不够"),
                            ("日薪最低", "产品/测试薪资不够"), ("没有可投的档位", "方向不对口"),
+                           ("高于你的学历", "学历不够"),
                            ("地点", "不在北京"), ("无法解析", "薪资读不出")):
             if key in reason:
                 return label

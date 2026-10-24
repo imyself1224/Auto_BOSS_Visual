@@ -29,6 +29,8 @@ _DEFAULTS: dict[str, dict[str, object]] = {
     "job_filter": {
         "require_internship": True,
         "min_daily_wage": 300.0,
+        # 我自己的最高学历（不限 / 大专 / 本科 / 硕士 / 博士）。空 = 不按学历筛。
+        "max_education": "",
         "work_days_per_month": 21.75,
         "allow_unparsable": False,
         "require_city": "北京",
@@ -144,6 +146,12 @@ class Config:
     def qq_keywords_path(self) -> Path:
         """QQ 上设定、下次任务沿用的检索关键词（一行一个）。发「/关键词 清空」删除。"""
         return PROJECT_ROOT / ".qq_keywords.txt"
+
+    @property
+    def qq_prefs_path(self) -> Path:
+        """QQ 上设定的学历 / 日薪（JSON）。发「/学历 不限」「/薪资 不限」取消限制；
+        删掉这个文件就全部回到 config.toml。"""
+        return PROJECT_ROOT / ".qq_prefs.json"
 
     def search_url(self, page: int = 1, query: str | None = None) -> str:
         from urllib.parse import quote

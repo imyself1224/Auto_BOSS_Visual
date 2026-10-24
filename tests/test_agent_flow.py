@@ -234,7 +234,7 @@ def agent_env(scenes, **kw):
 
 
 def make_agent(jobs_per_scene, daily_cap=10, source_mode="recommend", tmp=None,
-               dry_run=True, keywords=None):
+               dry_run=True, keywords=None, education=None, min_wage=None):
     cfg = cfgmod.load()
     cfg._raw["source"]["mode"] = source_mode
     cfg._raw["limits"]["daily_cap"] = daily_cap
@@ -259,7 +259,8 @@ def make_agent(jobs_per_scene, daily_cap=10, source_mode="recommend", tmp=None,
     store = Store(Path(tmp) / "t.db", "test")
     vision = FakeVision(jobs_per_scene)
     agent = GreetAgent(cfg, client, FakeSession(page), store, vision,
-                       dry_run=dry_run, verbose=False, keywords=keywords)
+                       dry_run=dry_run, verbose=False, keywords=keywords,
+                       education=education, min_wage=min_wage)
     # 走 run() 时这一步由 run() 完成；测试直接调 _loop / _pick_target 就得自己设
     agent.page = page
     return agent, page, store, vision, client
@@ -313,6 +314,31 @@ def test_filtered_not_repeated():
         for _ in range(3):
             check("无可发职位", agent._rank_targets(scene["jobs"]), [])
         check("同屏重复扫描只计一次", agent.stats["filtered"], 1)
+
+
+def test_agent_applies_education_and_wage_overrides():
+    """QQ / CLI 传进来的学历、日薪要盖住 config，并真的参与过滤。"""
+    silence()
+    base = {"location": "北京·海淀区", "district": "海淀区", "job_type": "实习",
+            "fit": "最匹配", "greet_click": {"x": 800, "y": 300},
+            "greeted": False, "confidence": 0.95}
+    scene = {"page_state": "job_list", "jobs": [
+        {**base, "title": "大模型算法实习生", "company": "A", "salary": "600元/天",
+         "tags": ["4天/周", "本科"]},
+        {**base, "title": "多模态算法实习生", "company": "B", "salary": "600元/天",
+         "tags": ["4天/周", "硕士"]},
+        {**base, "title": "推荐算法实习生", "company": "C", "salary": "400元/天",
+         "tags": ["4天/周", "本科"]},
+        # 卡片上读不出学历：不拦（和城市读不到不拦一致）
+        {**base, "title": "Agent实习生", "company": "D", "salary": "600元/天"},
+    ]}
+    with agent_env([scene] * 3, education="本科", min_wage=500) as (agent, page, store, vision, _):
+        check("学历覆盖成 本科", agent.rules.max_education, "本科")
+        check("日薪覆盖成 500", agent.rules.min_daily_wage, 500.0)
+        agent._enter_source()
+        titles = [j["title"] for j in agent._rank_targets(scene["jobs"])]
+        check("只要学历和日薪都过关的", titles, ["大模型算法实习生", "Agent实习生"])
+        check("过滤计数 = 2", agent.stats["filtered"], 2)
 
 
 def test_daily_cap_stops():
@@ -1010,6 +1036,7 @@ def test_card_title_paren_width_mismatch():
 
 if __name__ == "__main__":
     for fn in (test_filtering_and_ordering, test_filtered_not_repeated,
+               test_agent_applies_education_and_wage_overrides,
                test_daily_cap_stops, test_dry_run_never_clicks,
                test_card_title_paren_width_mismatch,
                test_platform_quota_text_stops_run,
