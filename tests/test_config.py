@@ -5,12 +5,14 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from autoboss import config as cfgmod  # noqa: E402
 from autoboss import prompts  # noqa: E402
+from autoboss.store import Store  # noqa: E402
 
 PASSED = 0
 FAILED: list[str] = []
@@ -80,9 +82,21 @@ def test_no_resume_prompt():
     check_true("无简历提示词更短", len(no_fit) < len(with_fit))
 
 
+def test_store_creates_data_dir():
+    """doctor 第一次跑爸妈版时，data/parents/ 还不存在。"""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        path = Path(tmp) / "data" / "parents" / "autoboss.db"
+        store = Store(path, "test")
+        try:
+            check_true("数据库父目录自动创建", path.is_file())
+        finally:
+            store.close()
+
+
 if __name__ == "__main__":
     for fn in (test_default_profile, test_parents_profile,
-               test_relative_path, test_no_resume_prompt):
+               test_relative_path, test_no_resume_prompt,
+               test_store_creates_data_dir):
         fn()
     total = PASSED + len(FAILED)
     print(f"通过 {PASSED}/{total}")

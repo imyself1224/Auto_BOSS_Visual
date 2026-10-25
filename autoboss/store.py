@@ -60,9 +60,13 @@ def job_key(title: str, company: str) -> str:
 
 class Store:
     def __init__(self, path: Path, run_id: str):
-        self.path = path
+        self.path = Path(path)
         self.run_id = run_id
-        self.conn = sqlite3.connect(str(path))
+        # 多账号的数据库在 data/<name>/ 下，第一次跑 doctor 时目录还不存在。
+        # sqlite3.connect 不会自动建父目录，这里补上。
+        if str(self.path) != ":memory:":
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(str(self.path))
         self.conn.executescript(_SCHEMA)
         self.conn.commit()
         self.conn.execute(
