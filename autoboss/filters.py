@@ -236,7 +236,7 @@ def evaluate(job: dict, rules: Rules) -> Verdict:
     # 排除实习时宁可严一点：模型/标题/标签只要有一处说是实习就不投。
     # （looks_like_internship 为了让「实习」判定有证据，模型说实习但标签没证据时会返回
     #   False；那套宽松规则适合「只投实习」，不适合「不要实习」。）
-    intern_claim = ("实习" in str(job.get("job_type") or "")
+    intern_claim = (any(marker in str(job.get("job_type") or "") for marker in _INTERN_MARKERS)
                     or any(marker in str(job.get("title") or "") for marker in _INTERN_MARKERS)
                     or any(marker in str(tag) for tag in (job.get("tags") or [])
                            for marker in _INTERN_MARKERS))
