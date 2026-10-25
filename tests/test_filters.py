@@ -301,9 +301,76 @@ def test_salary_unlimited():
     check("默认仍然拦低薪", v.ok, False)
 
 
+# ===========================================================================
+# 爸妈版：无简历 / 不要实习 / 月薪 5000 下限
+# ===========================================================================
+def _parent_job(**kw) -> dict:
+    base = {
+        "title": "普工", "company": "某某制造", "salary": "5-8K",
+        "location": "上海·浦东新区", "district": "浦东新区",
+        "job_type": "全职", "tags": ["经验不限"],
+    }
+    base.update(kw)
+    return base
+
+
+PARENT_RULES = Rules(
+    require_internship=False,
+    exclude_internship=True,
+    min_daily_wage=0,
+    min_monthly_wage=5000,
+    require_city="上海",
+    require_fit=False,
+    work_days_per_month=21.75,
+)
+
+
+def test_parent_mode():
+    v = evaluate(_parent_job(), PARENT_RULES)
+    check_true("5-8K 月薪最低正好 5000，放行", v.ok)
+    check("无简历模式不产生档位分", v.score, 0.0)
+    check_true("理由说明无简历模式", any("无简历" in r for r in v.reasons))
+
+    v = evaluate(_parent_job(salary="4-6K"), PARENT_RULES)
+    check("4-6K 月薪最低 4000，拒绝", v.ok, False)
+    check_true("拒绝理由写明月薪",
+               any("月薪最低 4000" in r for r in v.reasons))
+
+    v = evaluate(_parent_job(salary="6-8K"), PARENT_RULES)
+    check_true("6-8K 放行", v.ok)
+
+    v = evaluate(_parent_job(salary="5000-8000元/月"), PARENT_RULES)
+    check_true("5000-8000 元/月 放行", v.ok)
+
+    v = evaluate(_parent_job(salary="面议"), PARENT_RULES)
+    check("面议默认拒绝", v.ok, False)
+    check_true("拒绝理由写不出薪资",
+               any("薪资无法解析" in r for r in v.reasons))
+
+    v = evaluate(_parent_job(salary="8-10K", fit="不可用"), PARENT_RULES)
+    check_true("无简历模式不看 fit 字段", v.ok)
+
+    v = evaluate(_parent_job(title="普工实习生", job_type="实习"), PARENT_RULES)
+    check("实习岗被排除", v.ok, False)
+    check_true("拒绝理由写明实习",
+               any("是实习岗" in r for r in v.reasons))
+
+    v = evaluate(_parent_job(location="北京·朝阳区"),
+                 PARENT_RULES)
+    check("非上海被拒", v.ok, False)
+
+    # 只投实习的旧逻辑不能被新字段破坏
+    v = evaluate(_parent_job(), Rules(require_internship=True,
+                                      min_daily_wage=300,
+                                      require_city="上海",
+                                      fit_scores={"最匹配": 3.0}))
+    check("require_internship 仍然只认实习", v.ok, False)
+
+
 if __name__ == "__main__":
     for fn in (test_wage, test_internship, test_evaluate,
-               test_job_education, test_education_filter, test_salary_unlimited):
+               test_job_education, test_education_filter, test_salary_unlimited,
+               test_parent_mode):
         fn()
     total = PASSED + len(FAILED)
     print(f"通过 {PASSED}/{total}")

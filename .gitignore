@@ -1,5 +1,9 @@
 .env
 browser_profile/
+# 爸妈版独立 Edge profile（登录态，不提交）
+browser_profile_parents/
+# 多账号数据根目录：数据库 / 日志 / 截图
+data/
 shots/
 logs/
 autoboss.db

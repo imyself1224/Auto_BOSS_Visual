@@ -175,13 +175,20 @@ def job_education(job: dict) -> str:
 @dataclass
 class Rules:
     require_internship: bool = True
+    # 爸妈版用：明确排除实习岗（和 require_internship 互斥，两个都开时 require 优先）
+    exclude_internship: bool = False
     min_daily_wage: float = 300.0
+    # 月薪下限（元/月）。比较折算后月薪区间的**最低值**；
+    # 和 min_daily_wage 可以只开一个，都开时两个都要满足。
+    min_monthly_wage: float = 0.0
     work_days_per_month: float = 21.75
     allow_unparsable: bool = False
     require_city: str = "北京"
     # 学历（单个档位，空串 = 不筛）。主筛由 BOSS URL 的 degree 参数完成；
     # 这里只是拿卡片标签复核一遍，读不出学历的放行 —— 和城市读不到不拦一致。
     education: str = ""
+    # 无简历模式关掉：不做 fit 判定，硬条件通过就投。
+    require_fit: bool = True
     # 档位 → 排序分。模型把岗位跟求职者画像（resume/kb.md）对比后判一个档位
     # （最匹配 / 次匹配 / 可转投 / 不可用）。
     # **表里没有的档位一律不打招呼** —— 所以「不可用」不写进来即可。
@@ -224,11 +231,21 @@ def evaluate(job: dict, rules: Rules) -> Verdict:
     location = str(job.get("location") or "")
     salary_text = job.get("salary")
 
-    # ---- 硬条件 1：必须是实习 ----
-    if rules.require_internship and not looks_like_internship(job):
+    # ---- 硬条件 1：实习 / 非实习 ----
+    is_intern = looks_like_internship(job)
+    # 排除实习时宁可严一点：模型/标题/标签只要有一处说是实习就不投。
+    # （looks_like_internship 为了让「实习」判定有证据，模型说实习但标签没证据时会返回
+    #   False；那套宽松规则适合「只投实习」，不适合「不要实习」。）
+    intern_claim = ("实习" in str(job.get("job_type") or "")
+                    or any(marker in str(job.get("title") or "") for marker in _INTERN_MARKERS)
+                    or any(marker in str(tag) for tag in (job.get("tags") or [])
+                           for marker in _INTERN_MARKERS))
+    if rules.require_internship and not is_intern:
         hard_fail = f"不是实习岗（类型={job.get('job_type') or '未知'}）"
+    elif rules.exclude_internship and (is_intern or intern_claim):
+        hard_fail = "是实习岗（无简历模式只投正式岗）"
     else:
-        reasons.append("实习岗")
+        reasons.append("实习岗" if is_intern else "非实习岗")
 
     # ---- 硬条件 2：学历（兜底复核）----
     # 主筛是 BOSS 搜索地址的 degree 参数；这里拿卡片标签复核，读不出就放行。
@@ -241,24 +258,42 @@ def evaluate(job: dict, rules: Rules) -> Verdict:
             else:
                 reasons.append(f"学历要求{required}")
 
-    # ---- 硬条件 3：薪资下限（min_daily_wage <= 0 表示「不限」）----
+    # ---- 硬条件 3：薪资下限 ----
+    # 日薪、月薪可以只开一个；都开时两个都要满足。
+    # allow_unparsable 只负责「读不出薪资」这一种情况，不放过读出来但不够的。
     wage = None
+    need_wage = (rules.min_daily_wage > 0
+                 or rules.min_monthly_wage > 0
+                 or bool(rules.fit_min_low_wage))
     if hard_fail is None:
-        wage = parse_daily_wage(salary_text, rules.work_days_per_month)
-        if rules.min_daily_wage <= 0:
-            # 「薪资不限」：读不出来也放行，但照旧解析 —— 后面的档位门槛还要用它
-            reasons.append("不限薪资" if wage is None else f"日薪 {wage}（不限）")
-        elif wage is None:
-            if rules.allow_unparsable:
-                reasons.append(f"薪资无法解析，按容忍放行（{salary_text!r}）")
-            else:
-                hard_fail = f"薪资无法解析：{salary_text!r}"
-        else:
-            if wage.median < rules.min_daily_wage:
+        if need_wage:
+            wage = parse_daily_wage(salary_text, rules.work_days_per_month)
+
+        if rules.min_daily_wage > 0:
+            if wage is None:
+                if rules.allow_unparsable:
+                    reasons.append(f"薪资无法解析，按容忍放行（{salary_text!r}）")
+                else:
+                    hard_fail = f"薪资无法解析：{salary_text!r}"
+            elif wage.median < rules.min_daily_wage:
                 hard_fail = (f"日薪中位 {wage.median:.0f} < "
                              f"{rules.min_daily_wage:.0f}（{salary_text}）")
             else:
                 reasons.append(f"日薪 {wage}")
+
+        if hard_fail is None and rules.min_monthly_wage > 0:
+            if wage is None:
+                if rules.allow_unparsable:
+                    reasons.append(f"薪资无法解析，按容忍放行（{salary_text!r}）")
+                else:
+                    hard_fail = f"薪资无法解析：{salary_text!r}"
+            else:
+                monthly_low = wage.low * rules.work_days_per_month
+                if monthly_low < rules.min_monthly_wage:
+                    hard_fail = (f"月薪最低 {monthly_low:.0f} < "
+                                 f"{rules.min_monthly_wage:.0f}（{salary_text}）")
+                else:
+                    reasons.append(f"月薪最低 {monthly_low:.0f}（{salary_text}）")
 
     # ---- 硬条件 4：城市（读不到就不拦，推荐流本身就限定在城市）----
     if hard_fail is None and rules.require_city and location:
@@ -272,26 +307,30 @@ def evaluate(job: dict, rules: Rules) -> Verdict:
     #
     # 这是"打不打"和"先打谁"的依据。判定不了就不打 —— 跟读不全职位名的
     # 处理一致：宁可漏掉，也不能拿一个没核过的岗位去骚扰 HR。
-    fit = str(job.get("fit") or "").strip()
-    reason = str(job.get("fit_reason") or "").strip()
-    suffix = f"：{reason}" if reason else ""
-
-    if fit in rules.fit_scores:
-        tier = fit
-        floor = rules.fit_min_low_wage.get(fit)
-        if floor is not None and (wage is None or wage.low < float(floor)):
-            got = f"最低 {wage.low:.0f}" if wage is not None else "读不出薪资"
-            gate = f"「{fit}」日薪最低 {got} < {float(floor):.0f}"
-            tier = rules.fit_fallback.get(fit, "")
-            if tier not in rules.fit_scores:
-                return Verdict(False, 0.0, [f"{gate}（{salary_text}）{suffix}"])
-            reasons.append(f"{gate}，按「{tier}」投")
-        score = float(rules.fit_scores[tier])
-        reasons.append(f"{fit}{suffix}")
+    # 无简历模式（require_fit=false）跳过这一层，硬条件通过就投。
+    if not rules.require_fit:
+        reasons.append("无简历模式：硬条件通过即可")
     else:
-        return Verdict(False, 0.0, [
-            f"没有可投的档位{('（' + fit + '）') if fit else '（模型没给 fit 字段）'}{suffix}"
-        ])
+        fit = str(job.get("fit") or "").strip()
+        reason = str(job.get("fit_reason") or "").strip()
+        suffix = f"：{reason}" if reason else ""
+
+        if fit in rules.fit_scores:
+            tier = fit
+            floor = rules.fit_min_low_wage.get(fit)
+            if floor is not None and (wage is None or wage.low < float(floor)):
+                got = f"最低 {wage.low:.0f}" if wage is not None else "读不出薪资"
+                gate = f"「{fit}」日薪最低 {got} < {float(floor):.0f}"
+                tier = rules.fit_fallback.get(fit, "")
+                if tier not in rules.fit_scores:
+                    return Verdict(False, 0.0, [f"{gate}（{salary_text}）{suffix}"])
+                reasons.append(f"{gate}，按「{tier}」投")
+            score = float(rules.fit_scores[tier])
+            reasons.append(f"{fit}{suffix}")
+        else:
+            return Verdict(False, 0.0, [
+                f"没有可投的档位{('（' + fit + '）') if fit else '（模型没给 fit 字段）'}{suffix}"
+            ])
 
     # ---- 地点软排序：只加分，不排除 ----
     district = str(job.get("district") or "") or location

@@ -88,6 +88,8 @@ def cmd_doctor(cfg, args):
 
     # 1) 配置
     print("\n[1/5] 配置")
+    print(f"  账号档位    {cfg.name}（{cfg.path.name}）"
+          + (f" · {cfg.description}" if cfg.description else ""))
     plan = kwlib.planned_sources(cfg)
     picked = kwlib.queries_of(plan)
     shown = "、".join(picked[:6]) + ("…" if len(picked) > 6 else "")
@@ -95,18 +97,25 @@ def cmd_doctor(cfg, args):
     print(f"  城市        {cfg.get('search.city')}")
     print(f"  学历要求    {preferences.education_from_config(cfg) or '不限'}")
     print(f"  日薪下限    {cfg.get('job_filter.min_daily_wage')}")
+    print(f"  月薪下限    {cfg.get('job_filter.min_monthly_wage')} 元/月")
     print(f"  视觉模型    {cfg.get('deepseek.vision_model')}")
     print(f"  今日上限    {cfg.get('limits.daily_cap')}")
     print(f"  dry_run     {cfg.get('safety.dry_run')}")
-    # 求职者画像：没有它就没法判断岗位能不能投，greet 会直接停机
-    kb_file = Path(str(cfg.get("resume.kb_path", "resume/kb.md")))
-    if kb_file.is_file() and kb_file.read_text(encoding="utf-8").strip():
+    # 求职者画像：有简历模式没有它就没法判断能不能投；无简历模式只按硬条件筛。
+    kb_required = bool(cfg.get("resume.required", True))
+    kb_file = cfg.project_path(str(cfg.get("resume.kb_path", "resume/kb.md") or ""))
+    if not kb_required:
+        print("  求职画像    无简历模式（不做匹配度判断，硬条件通过就投）")
+        kb = ""
+    elif kb_file.is_file() and kb_file.read_text(encoding="utf-8").strip():
         print(f"  求职画像    {kb_file}（{len(kb_file.read_text(encoding='utf-8'))} 字）")
+        kb = kb_file.read_text(encoding="utf-8").strip()
     else:
         print(f"  ✗ 找不到求职者画像：{kb_file}")
         print("     它是判断岗位能不能投的唯一依据。照 README「生成求职者画像」一节，")
         print("     让 DeepSeek 读你的简历生成，存成这个文件（格式见 resume/kb.example.md）。")
         ok = False
+        kb = ""
 
     # 2) API key
     print("\n[2/5] DeepSeek API key")
@@ -147,8 +156,11 @@ def cmd_doctor(cfg, args):
     vision = Vision(client, cfg, store, cfg.shots_dir, "doctor")
     try:
         page.navigate(cfg.search_url(1), settle=4.5)
-        kb = kb_file.read_text(encoding="utf-8").strip() if kb_file.is_file() else ""
-        data = vision.look(page, prompts.list_user(kb), tag="doctor")
+        data = vision.look(
+            page,
+            prompts.list_user(kb, require_fit=bool(cfg.get("job_filter.require_fit", True))),
+            tag="doctor",
+        )
         state = data.get("page_state")
         jobs = data.get("jobs") or []
         print(f"  ✓ 页面判定    {state}")
@@ -235,9 +247,9 @@ class _Tee:
         self._fh.flush()
 
 
-def _start_log() -> Path:
-    logs = Path(__file__).resolve().parent / "logs"
-    logs.mkdir(exist_ok=True)
+def _start_log(cfg) -> Path:
+    logs = cfg.logs_dir
+    logs.mkdir(parents=True, exist_ok=True)
     path = logs / f"greet_{datetime.now():%Y%m%d_%H%M%S}.log"
     sys.stdout = _Tee(sys.stdout, path)
     sys.stderr = _Tee(sys.stderr, path)
@@ -301,9 +313,9 @@ def _notify_end(notifier, cfg, kind: str, stats: dict, dry_run: bool,
 
 def _hard_filters_line(cfg, education: str | None = None,
                        min_wage: float | None = None) -> str:
-    """任务开始推送里的「学历 / 日薪」这一行。
+    """任务开始推送里的「学历 / 薪资」这一行。
 
-    None 表示这次没指定，回落到 config.toml 的值 —— 推给大号的就是**真正生效**的条件。
+    None 表示这次没指定，回落到配置文件的值 —— 推给大号的就是**真正生效**的条件。
     """
     if education is None:
         education = preferences.education_from_config(cfg)
@@ -313,8 +325,14 @@ def _hard_filters_line(cfg, education: str | None = None,
     edu_text = education or "不限"
     if degree:
         edu_text += f"（degree={degree}）"
-    wage_text = f"中位 ≥{min_wage:g} 元/天" if min_wage > 0 else "不限"
-    return f"🎓 学历要求 {edu_text} · 💰 日薪 {wage_text}"
+    wages = []
+    if min_wage > 0:
+        wages.append(f"日薪中位 ≥{min_wage:g} 元/天")
+    monthly = float(cfg.get("job_filter.min_monthly_wage", 0) or 0)
+    if monthly > 0:
+        wages.append(f"月薪最低 ≥{monthly:g} 元/月")
+    wage_text = " · ".join(wages) or "不限"
+    return f"🎓 学历要求 {edu_text} · 💰 薪资 {wage_text}"
 
 
 def _start_notice(cfg, keywords, dry_run: bool, limit: int | None,
@@ -335,7 +353,7 @@ def _start_notice(cfg, keywords, dry_run: bool, limit: int | None,
         head += f"，本次最多 {limit} 条"
     lines = [head]
     if picked:
-        src = "，来自 QQ 指令" if keywords else "（config.toml）"
+        src = "，来自 QQ 指令" if keywords else f"（{cfg.path.name}）"
         lines.append(f"🔎 本次检索关键词 {len(picked)} 个{src}：")
         lines.append(kwlib.block(picked))
     else:
@@ -382,7 +400,7 @@ def _cli_min_wage(raw) -> float | None:
 
 
 def cmd_greet(cfg, args):
-    log_path = _start_log()
+    log_path = _start_log(cfg)
     print(f"[log] 本次输出同时写入 {log_path}")
 
     # QQ 指令 / --keywords 指定的关键词：只搜这些，覆盖 config 的 [search].queries
@@ -446,6 +464,7 @@ def _greet_auto(cfg, args, log_path: Path | None = None,
     restarts = 0
     totals = {"sent": 0, "failed": 0, "filtered": 0}
     limit = args.limit
+    config_path = cfg.path
     # 关键词在整个 --auto 任务里固定：每轮重建 agent 时都传同一份，
     # 中途改了 config.toml 的 queries 也只影响下一次任务（自动重启不算新任务）。
     words = (keywords if keywords is not None
@@ -457,7 +476,7 @@ def _greet_auto(cfg, args, log_path: Path | None = None,
         min_wage = _cli_min_wage(getattr(args, "min_wage", None))
     while True:
         print(f"\n[auto] 第 {restarts + 1} 轮开始（{datetime.now():%H:%M:%S}）")
-        cfg = cfgmod.load()        # 每轮重读配置，中途改了 config.toml 也能生效
+        cfg = cfgmod.load(config_path)   # 每轮重读同一份配置，改了也能生效
         notifier = Notifier(cfg)
         kind = "error"
         store = None
@@ -572,6 +591,10 @@ def main():
         prog="run.py",
         description="BOSS 直聘自动打招呼 agent（视觉 + CDP + DeepSeek）",
     )
+    parser.add_argument(
+        "-c", "--config", default="", metavar="配置文件",
+        help="用哪份配置（默认 config.toml）。例如 --config config.parents.toml；"
+             "每份配置有独立的 Edge profile / 数据库 / 日志 / 截图。")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("doctor", help="自检整条链路")
@@ -604,7 +627,10 @@ def main():
     sub.add_parser("bot", help="QQ 机器人：推送投递结果，接收大号的遥控指令")
 
     args = parser.parse_args()
-    cfg = cfgmod.load()
+    config_path = Path(args.config) if args.config else cfgmod.CONFIG_PATH
+    if not config_path.is_absolute():
+        config_path = cfgmod.PROJECT_ROOT / config_path
+    cfg = cfgmod.load(config_path)
 
     handlers = {
         "doctor": with_browser_lock(cmd_doctor),

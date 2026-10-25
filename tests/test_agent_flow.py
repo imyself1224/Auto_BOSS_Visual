@@ -234,7 +234,8 @@ def agent_env(scenes, **kw):
 
 
 def make_agent(jobs_per_scene, daily_cap=10, source_mode="recommend", tmp=None,
-               dry_run=True, keywords=None, education=None, min_wage=None):
+               dry_run=True, keywords=None, education=None, min_wage=None,
+               no_resume=False):
     cfg = cfgmod.load()
     cfg._raw["source"]["mode"] = source_mode
     cfg._raw["limits"]["daily_cap"] = daily_cap
@@ -246,13 +247,29 @@ def make_agent(jobs_per_scene, daily_cap=10, source_mode="recommend", tmp=None,
     # test_dry_run_never_clicks 的断言。单独有测试覆盖它。
     cfg._raw.setdefault("job_filter", {})["boss_filters"] = []
 
-    # 求职者画像：测试自带一份，不依赖仓库里那份真的 resume/kb.md。
-    # （没有它 agent 会直接停机 —— 那是刻意的，见 GreetAgent._require_kb）
-    kb_file = Path(tmp) / "kb.md"
-    kb_file.write_text(
-        "# 测试画像\n可投：推荐算法实习生、大模型算法实习生、Agent 岗位。\n",
-        encoding="utf-8")
-    cfg._raw.setdefault("resume", {})["kb_path"] = str(kb_file)
+    if no_resume:
+        # 爸妈版：没有 kb.md，只按硬条件筛。
+        cfg._raw.setdefault("job_filter", {}).update({
+            "require_internship": False,
+            "exclude_internship": True,
+            "min_daily_wage": 0,
+            "min_monthly_wage": 5000,
+            "require_city": "上海",
+            "require_fit": False,
+            "fit_scores": {},
+            "fit_min_low_wage": {},
+            "fit_fallback": {},
+        })
+        cfg._raw.setdefault("resume", {})["required"] = False
+        cfg._raw["resume"]["kb_path"] = str(Path(tmp) / "missing-kb.md")
+    else:
+        # 求职者画像：测试自带一份，不依赖仓库里那份真的 resume/kb.md。
+        # （没有它 agent 会直接停机 —— 那是刻意的，见 GreetAgent._require_kb）
+        kb_file = Path(tmp) / "kb.md"
+        kb_file.write_text(
+            "# 测试画像\n可投：推荐算法实习生、大模型算法实习生、Agent 岗位。\n",
+            encoding="utf-8")
+        cfg._raw.setdefault("resume", {})["kb_path"] = str(kb_file)
 
     page = FakePage()
     client = FakeClient()
@@ -1056,6 +1073,27 @@ def test_card_title_paren_width_mismatch():
         check("公司对不上就不按文字点", page.clicks, [(240, 135)])
 
 
+def test_no_resume_parent_mode():
+    """爸妈版：没有 kb.md 也能跑，硬条件通过就投，不做 fit 判定。"""
+    silence()
+    job = {"title": "普工", "company": "某某制造", "salary": "6-8K",
+           "location": "上海·浦东新区", "district": "浦东新区",
+           "job_type": "全职", "tags": ["经验不限"],
+           "greet_click": {"x": 800, "y": 300}, "greeted": False}
+    scene = {"page_state": "job_list", "jobs": [job]}
+    with agent_env([scene] * 3, no_resume=True) as (agent, page, store, vision, _):
+        check("无简历模式不要求 kb", agent._require_kb(), None)
+        check("kb 为空", agent.kb, "")
+        check("不做 fit 判定", agent.rules.require_fit, False)
+        targets = agent._rank_targets([job])
+        check("硬条件通过就入选", len(targets), 1)
+        low = {**job, "company": "低薪公司", "salary": "4-6K"}
+        check("月薪最低不到 5000 被拦", agent._rank_targets([low]), [])
+        intern = {**job, "company": "实习公司", "title": "普工实习生",
+                  "job_type": "实习"}
+        check("实习岗被拦", agent._rank_targets([intern]), [])
+
+
 if __name__ == "__main__":
     for fn in (test_filtering_and_ordering, test_filtered_not_repeated,
                test_agent_applies_education_and_wage_overrides,
@@ -1071,6 +1109,7 @@ if __name__ == "__main__":
                test_filter_menu_closed_after_select, test_scroll_overlaps_screens,
                test_success_popup_closed_by_page_text,
                test_run_limit_independent_of_today_sent,
+               test_no_resume_parent_mode,
                
                test_boss_filters_clicked, test_boss_filters_persist_in_url,
                test_filter_misfire_is_detected_and_retried,

@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import random
 import time
-from pathlib import Path
 
 from . import filters, humanize, keywords as kw, overlay, preferences, prompts
 from .deepseek import DeepSeekError
@@ -113,13 +112,17 @@ class GreetAgent:
         self.filter_why: dict[str, int] = {}
 
         edu = preferences.education_from_config(cfg)
+        self.require_fit = bool(cfg.get("job_filter.require_fit", True))
         self.rules = filters.Rules(
             require_internship=bool(cfg.get("job_filter.require_internship", True)),
+            exclude_internship=bool(cfg.get("job_filter.exclude_internship", False)),
             min_daily_wage=float(cfg.get("job_filter.min_daily_wage", 300)),
+            min_monthly_wage=float(cfg.get("job_filter.min_monthly_wage", 0) or 0),
             education=edu,
             work_days_per_month=float(cfg.get("job_filter.work_days_per_month", 21.75)),
             allow_unparsable=bool(cfg.get("job_filter.allow_unparsable", False)),
             require_city=str(cfg.get("job_filter.require_city", "北京")),
+            require_fit=self.require_fit,
             fit_scores=dict(cfg.get("job_filter.fit_scores", {}) or {}),
             fit_min_low_wage=dict(cfg.get("job_filter.fit_min_low_wage", {}) or {}),
             fit_fallback=dict(cfg.get("job_filter.fit_fallback", {}) or {}),
@@ -144,9 +147,12 @@ class GreetAgent:
         # 求职者画像（外接知识库）—— 判断岗位「能不能投、先投谁」的唯一依据。
         # 它就是一个你自己维护的 markdown 文件，程序只读、从不改写。
         # 每扫一屏职位，这段文字会被原样拼进提示词。
-        self.kb_path = Path(str(cfg.get("resume.kb_path", "resume/kb.md")))
+        # 无简历模式（resume.required = false）不读它，只按 [job_filter] 的硬条件筛。
+        self.kb_required = bool(cfg.get("resume.required", True))
+        raw_kb = str(cfg.get("resume.kb_path", "resume/kb.md") or "").strip()
+        self.kb_path = cfg.project_path(raw_kb) if raw_kb else None
         self.kb = (self.kb_path.read_text(encoding="utf-8").strip()
-                   if self.kb_path.is_file() else "")
+                   if self.kb_path is not None and self.kb_path.is_file() else "")
 
         # QQ 遥控「停止」时 bot 会建这个文件，扫描/投递间隙看到就收工
         self.stop_flag = cfg.stop_flag
@@ -203,14 +209,20 @@ class GreetAgent:
 
     # ------------------------------------------------------------------
     def _require_kb(self):
-        """没有求职者画像就没法判断岗位能不能投 —— 在开浏览器之前就拦住。"""
+        """有简历模式缺画像就没法判断岗位能不能投 —— 在开浏览器之前就拦住。
+
+        无简历模式（resume.required = false）直接放行，只按硬条件筛。
+        """
+        if not self.kb_required:
+            return
         if self.kb:
             return
         raise StopRun(
-            f"找不到求职者画像：{self.kb_path}\n"
+            f"找不到求职者画像：{self.kb_path or '（config 里 resume.kb_path 为空）'}\n"
             "  它是判断岗位能不能投的唯一依据（路径见 config.toml 的 [resume]）。\n"
             "  照 README「生成求职者画像」一节，把简历和提示词交给 DeepSeek 网页版生成，\n"
-            "  存成这个 markdown 文件（格式可参考 resume/kb.example.md），然后重跑。",
+            "  存成这个 markdown 文件（格式可参考 resume/kb.example.md），然后重跑。\n"
+            "  如果这个账号本来就不看简历，把 [resume].required 设成 false。",
             "stop",
         )
 
@@ -300,21 +312,37 @@ class GreetAgent:
         sources = self._sources()
         src = " → ".join(kw.label(k, q) for k, q in sources)
         mode = "演练模式（不会真的发送）" if self.dry_run else "实发模式"
-        wage = (f"日薪中位 ≥{self.rules.min_daily_wage:.0f}"
-                if self.rules.min_daily_wage > 0 else "薪资不限")
+        wages = []
+        if self.rules.min_daily_wage > 0:
+            wages.append(f"日薪中位 ≥{self.rules.min_daily_wage:.0f}")
+        if self.rules.min_monthly_wage > 0:
+            wages.append(f"月薪最低 ≥{self.rules.min_monthly_wage:.0f}")
+        wage = " · ".join(wages) or "薪资不限"
         education = ""
         if self.rules.education:
             education = f" · 学历要求 {self.rules.education}"
+        if self.rules.require_internship:
+            job_kind = "只看实习"
+        elif self.rules.exclude_internship:
+            job_kind = "排除实习"
+        else:
+            job_kind = "不限类型"
+        if self.require_fit:
+            tier_line = (f"  投递档位："
+                         f"{'、'.join(self._tier_desc(t) for t in self.rules.fit_scores) or '—'}"
+                         f"（未列出的档位 = 不发）")
+        else:
+            tier_line = "  投递档位：无简历模式（硬条件通过就投，不判匹配度）"
 
         lines = [
             "─" * 62,
+            f"  账号档位：{self.cfg.name}",
             f"  职位来源：{src}",
-            f"  硬性条件：{'实习' if self.rules.require_internship else '不限类型'}"
-            f" · {wage} · {self.rules.require_city}{education}",
-            f"  投递档位：{'、'.join(self._tier_desc(t) for t in self.rules.fit_scores) or '—'}"
-            f"（未列出的档位 = 不发）",
+            f"  硬性条件：{job_kind} · {wage} · {self.rules.require_city}{education}",
+            tier_line,
             f"  优先区域：{'、'.join(self.rules.prefer_districts) or '—'}",
-            f"  求职画像：{self.kb_path}",
+            (f"  求职画像：{self.kb_path}" if self.kb_path
+             else "  求职画像：无（无简历模式）"),
             f"  本次最多发 {budget} 条（今日上限 {self.cap}）"
             f"   间隔 {self.min_interval:.0f}–{self.max_interval:.0f}s",
             f"  {mode}",
@@ -371,7 +399,7 @@ class GreetAgent:
                     self.log("  ! 重进后还在，这个来源先放弃")
                     return
 
-            data = self._look(prompts.list_user(self.kb), tag)
+            data = self._look(prompts.list_user(self.kb, require_fit=self.require_fit), tag)
             self._check_risk(data)
 
             state = data.get("page_state")
@@ -880,12 +908,13 @@ class GreetAgent:
             self.log(f"    · {job.get('title')} @ {job.get('company')}  {verdict}")
         return [job for _, job, _ in candidates]
 
-    @staticmethod
-    def _why_category(reason: str) -> str:
-        for key, label in (("不是实习", "不是实习"), ("日薪中位", "日薪不够"),
+    def _why_category(self, reason: str) -> str:
+        city = self.rules.require_city or "目标城市"
+        for key, label in (("不是实习", "不是实习"), ("是实习岗", "实习岗（无简历模式只投正式岗）"),
+                           ("日薪中位", "日薪不够"), ("月薪最低", "月薪不够"),
                            ("日薪最低", "产品/测试薪资不够"), ("没有可投的档位", "方向不对口"),
                            ("不是设置的", "学历不够"),
-                           ("地点", "不在北京"), ("无法解析", "薪资读不出")):
+                           ("地点", f"不在{city}"), ("无法解析", "薪资读不出")):
             if key in reason:
                 return label
         return "其他"
@@ -1275,7 +1304,7 @@ class GreetAgent:
         s = self.stats
         print(
             f"\n{'═' * 62}\n"
-            f"  本次运行结束\n"
+            f"  本次运行结束（{self.cfg.name}）\n"
             f"    已发送    {s['sent']}\n"
             f"    演练      {s['dry_run']}\n"
             f"    已沟通过  {s['already']}\n"

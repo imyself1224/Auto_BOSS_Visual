@@ -408,8 +408,9 @@ class QQBot:
         """当前真正生效的全部要求，一眼看全。"""
         cfg = self.cfg
         try:
-            # bot 可能已经常驻好几天，config.toml 改完要能立即反映出来
-            cfg = cfgmod.load()
+            # bot 可能已经常驻好几天，配置文件改完要能立即反映出来；
+            # 用启动时那份配置的路径，--config 指定的账号不会串到默认配置。
+            cfg = cfgmod.load(self.cfg.path)
         except (Exception, SystemExit):  # noqa: BLE001
             pass
         prefs = self._prefs()
@@ -510,9 +511,9 @@ class QQBot:
         pending = self.pending_keywords()
         cfg = self.cfg
         try:
-            # bot 可能已经常驻好几天，config.toml 改完要能立即反映出来；
+            # bot 可能已经常驻好几天，配置文件改完要能立即反映出来；
             # 读坏了（正在编辑、文件暂时不在）就退回启动时那份。
-            cfg = cfgmod.load()
+            cfg = cfgmod.load(self.cfg.path)
         except (Exception, SystemExit):  # noqa: BLE001
             pass
         plan = kw.planned_sources(cfg, pending)

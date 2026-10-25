@@ -15,6 +15,10 @@ ENV_PATH = PROJECT_ROOT / ".env"
 
 # 配置里允许缺失的键，用这里的默认值兜底，避免用户改配置时漏字段就崩。
 _DEFAULTS: dict[str, dict[str, object]] = {
+    # 一套配置 = 一个账号。默认档位把数据放在项目根目录；
+    # 用 --config 换一份配置时，把 data_dir 指到独立目录，
+    # 数据库 / 日志 / 截图 / 登录态就不会互相污染。
+    "app": {"name": "self", "description": "", "data_dir": ""},
     "deepseek": {
         "api_key_env": "DEEPSEEK_API_KEY",
         "base_url": "https://api.deepseek.com",
@@ -25,15 +29,22 @@ _DEFAULTS: dict[str, dict[str, object]] = {
     },
     "search": {"query": "", "city": "100010000", "pages": 1},
     "source": {"mode": "recommend"},
-    "resume": {"kb_path": "resume/kb.md"},
+    "resume": {"kb_path": "resume/kb.md", "required": True},
     "job_filter": {
         "require_internship": True,
+        # 爸妈版用：不要实习岗（和 require_internship 是互斥语义，默认都不开）
+        "exclude_internship": False,
         "min_daily_wage": 300.0,
+        # 月薪下限（元/月）。和 min_daily_wage 可以只开一个；都开时两个都要满足。
+        # 比较的是折算后月薪的**区间最低值**，避免「4-6K」这种下限不到 5000 的岗位混进来。
+        "min_monthly_wage": 0.0,
         # 学历（单个档位；空 = 不按学历筛，拼成 BOSS URL 的 degree 参数）
         "education": "",
         "work_days_per_month": 21.75,
         "allow_unparsable": False,
         "require_city": "北京",
+        # 有简历时按档位判匹配；无简历模式关掉，硬条件通过就投。
+        "require_fit": True,
         # 档位权重：模型按知识库把岗位判成这几档，这里决定每档的排序分。
         # 表里没有的档位（「不可用」）= 不打招呼。
         "fit_scores": {"最匹配": 3.0, "次匹配": 2.0, "可转投": 1.0},
@@ -83,9 +94,10 @@ def load_env(path: Path = ENV_PATH) -> dict[str, str]:
 class Config:
     """点号访问的只读配置包装。cfg.get("limits.daily_cap")。"""
 
-    def __init__(self, raw: dict, env: dict[str, str]):
+    def __init__(self, raw: dict, env: dict[str, str], path: Path | None = None):
         self._raw = raw
         self._env = env
+        self.path = path or CONFIG_PATH
 
     def get(self, dotted: str, default=None):
         section, _, key = dotted.partition(".")
@@ -115,43 +127,71 @@ class Config:
         return key
 
     # --- 派生路径 ---------------------------------------------------
+    def project_path(self, value: str | Path) -> Path:
+        """相对路径统一按项目根目录解析，不依赖当前工作目录。
+
+        计划任务 / 从别的目录执行 `python D:\\...\\run.py` 时，
+        `Path("resume/kb.md")` 会解析到错误的位置。
+        """
+        path = Path(str(value))
+        return path if path.is_absolute() else (PROJECT_ROOT / path)
+
+    @property
+    def name(self) -> str:
+        return str(self.get("app.name", "self") or "self")
+
+    @property
+    def description(self) -> str:
+        return str(self.get("app.description", "") or "")
+
+    @property
+    def data_dir(self) -> Path:
+        """这个账号的数据根目录；默认项目根目录（兼容旧版）。"""
+        configured = str(self.get("app.data_dir", "") or "").strip()
+        return self.project_path(configured) if configured else PROJECT_ROOT
+
     @property
     def user_data_dir(self) -> Path:
-        configured = self.get("browser.user_data_dir", "")
-        return Path(configured) if configured else PROJECT_ROOT / "browser_profile"
+        configured = str(self.get("browser.user_data_dir", "") or "").strip()
+        return self.project_path(configured) if configured else self.data_dir / "browser_profile"
 
     @property
     def shots_dir(self) -> Path:
-        return PROJECT_ROOT / "shots"
+        return self.data_dir / "shots"
 
     @property
     def logs_dir(self) -> Path:
-        return PROJECT_ROOT / "logs"
+        return self.data_dir / "logs"
 
     @property
     def db_path(self) -> Path:
-        return PROJECT_ROOT / "autoboss.db"
+        return self.data_dir / "autoboss.db"
 
     @property
     def stop_flag(self) -> Path:
         """QQ 遥控「停止」时创建；投递进程看到它就收工。"""
-        return PROJECT_ROOT / ".stop_request"
+        return self.data_dir / ".stop_request"
 
     @property
     def lock_path(self) -> Path:
-        """浏览器独占锁（见 autoboss/lock.py）。"""
+        """浏览器独占锁（见 autoboss/lock.py）。
+
+        故意放在项目根目录、不随 data_dir 走：两个 Edge profile 虽然完全独立，
+        但同时操作两个浏览器窗口会互相抢焦点、截图也会拍错窗口，
+        所以同一时间只允许一个任务操作浏览器。
+        """
         return PROJECT_ROOT / ".browser.lock"
 
     @property
     def qq_keywords_path(self) -> Path:
         """QQ 上设定、下次任务沿用的检索关键词（一行一个）。发「/关键词 清空」删除。"""
-        return PROJECT_ROOT / ".qq_keywords.txt"
+        return self.data_dir / ".qq_keywords.txt"
 
     @property
     def qq_prefs_path(self) -> Path:
         """QQ 上设定的学历 / 日薪（JSON）。发「/学历 不限」「/薪资 不限」取消限制；
         删掉这个文件就全部回到 config.toml。"""
-        return PROJECT_ROOT / ".qq_prefs.json"
+        return self.data_dir / ".qq_prefs.json"
 
     def search_url(self, page: int = 1, query: str | None = None,
                    degree: str = "") -> str:
@@ -178,8 +218,9 @@ class Config:
 
 
 def load(path: Path = CONFIG_PATH) -> Config:
+    path = Path(path).expanduser()
     if not path.exists():
         raise SystemExit(f"找不到配置文件：{path}")
     with path.open("rb") as fh:
         raw = tomllib.load(fh)
-    return Config(raw, load_env())
+    return Config(raw, load_env(), path=path)

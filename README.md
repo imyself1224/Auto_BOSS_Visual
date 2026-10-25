@@ -1,6 +1,6 @@
 # Auto BOSS Visual
 
-用**纯视觉**驱动浏览器，在 BOSS 直聘上按你的简历自动筛岗位、自动打招呼（点「立即沟通」）。
+用**纯视觉**驱动浏览器，在 BOSS 直聘上按你的简历（或单纯按城市 / 薪资等硬条件）自动筛岗位、自动打招呼（点「立即沟通」）。
 视觉定位和岗位匹配全部交给 DeepSeek，不解析页面 DOM。
 
 - 🖼️ **纯视觉**：截图 + 归一化网格 → 模型报坐标 → CDP 发可信鼠标事件。页面改版、薪资字体加密都不怕。
@@ -8,6 +8,7 @@
 - 🧮 **硬条件过滤**：只投实习、日薪下限、岗位学历档位（写进 BOSS URL 的 `degree` 参数，平台筛）、城市、地区加分，薪资统一折算成日薪再比。
 - 🛑 **安全阀**：默认演练不发送；验证码 / 平台额度提示立即停机；去重库保证不重复打扰。
 - 📱 **QQ 遥控（可选）**：小号推送每条投递结果和本次检索关键词，大号用单独指令设好关键词 / 学历 / 日薪，再发 `/投递` 或 `/投递 10`；`/配置` 一眼看全当前条件。
+- 👥 **多账号 / 多配置**：`--config config.parents.toml` 就能换一套完全独立的账号档位——独立的 Edge profile、数据库、日志和截图；仓库自带一个「爸妈版」：无简历、上海、月薪 ≥5000。
 - 📦 **只依赖一个 `websockets`**，其余全是 Python 标准库。
 
 ---
@@ -85,6 +86,28 @@ python run.py stats                           # 看历史记录
 ```
 
 **第一次务必按 ①→②→③→④ 的顺序走。**
+
+### 6. 给爸妈投（可选，第二个账号）
+
+`config.parents.toml` 是一个独立档位：**无简历、只看上海、月薪最低 5000、排除实习**。
+它用另一个 Edge profile（`browser_profile_parents/`）和独立数据目录（`data/parents/`），
+登录态、去重库、日志、截图都和本人版分开。
+
+```bash
+python run.py --config config.parents.toml doctor
+python run.py --config config.parents.toml login          # 扫码登录爸妈的 BOSS 账号
+python run.py --config config.parents.toml greet --limit 1
+python run.py --config config.parents.toml greet --live --limit 1 --yes
+python run.py --config config.parents.toml greet --auto
+```
+
+也可以双击 `login_parents.bat` 登录、`daily_greet_parents.bat` 无人值守。
+
+第一次先把 `config.parents.toml` 的 `[search].queries` 改成爸妈实际能做的岗位；
+默认是上海常见的宽口径词（普工 / 操作工 / 仓管 / 司机 / 保安 / 保洁 / 店员 / 客服 …）。
+
+> 两个账号**不要同时跑**：程序用一把全局浏览器锁，保证同一时间只有一个窗口在操作。
+> 两个 Edge profile 可以同时开着，但任务会排队。
 
 ---
 
@@ -249,7 +272,31 @@ queries = [
 
 ## 配置说明
 
-所有配置都在 `config.toml`，改完下次运行立即生效。`[source]` 决定**去哪找**，`[job_filter]` 决定**发不发**。
+默认读 `config.toml`，改完下次运行立即生效。`[source]` 决定**去哪找**，`[job_filter]` 决定**发不发**。
+
+### 多账号 `[app]` / `--config`
+
+一套配置就是一个账号。`--config` 可以换一份配置：
+
+```bash
+python run.py --config config.parents.toml greet --limit 1
+```
+
+每份配置用 `[app].data_dir` 指定自己的数据根目录，用 `[browser].user_data_dir` 指定自己的
+Edge profile，用 `[browser].cdp_port` 指定自己的调试端口。这样两套账号的登录态、去重库、
+日志、截图完全分开，不会互相覆盖。
+
+```toml
+[app]
+name     = "parents"
+data_dir = "data/parents"          # 数据库 / 日志 / 截图
+
+[browser]
+user_data_dir = "browser_profile_parents"
+cdp_port      = 9223               # 本人版是 9222
+```
+
+> 浏览器锁 `.browser.lock` 仍然放在项目根目录：两个 profile 可以同时开着，但**任务一次只跑一个**。
 
 ### 职位来源 `[source]` / `[search]`
 
@@ -294,13 +341,20 @@ QQ 上设的条件存在项目根目录的 `.qq_prefs.json`（已在 `.gitignore
 | 条件 | 默认 | 说明 |
 |---|---|---|
 | `require_internship` | `true` | 只要实习岗（看标题和标签，校招全职不算） |
+| `exclude_internship` | `false` | 爸妈版用：排除实习岗（标题 / 标签 / 类型任一处出现实习就跳过） |
 | `min_daily_wage` | `300` | 日薪下限，**区间取中位数**；`0` = 不限。BOSS 没有日薪档，由程序按卡片薪资精确比较 |
+| `min_monthly_wage` | `0` | 月薪下限，**按折算后月薪区间的最低值**比较；`0` = 不限。和日薪下限可只开一个 |
 | `education` | `"不限"` | 岗位学历档位（不限 / 大专 / 本科 / 硕士 / 博士），拼成 URL 的 `degree` 参数（如硕士 = `204`）。设了具体档位后 BOSS 会排除「学历不限」的岗位 |
 | `require_city` | `"北京"` | 地点不含这几个字就跳过 |
 | `allow_unparsable` | `false` | 薪资读不出来（如「面议」）时是否照发 |
+| `require_fit` | `true` | 是否按求职者画像判档；无简历模式设 `false`，硬条件通过就投 |
 
-学历由平台在 URL 层过滤，不花模型调用；日薪和城市是**卡片级**兜底，读不出来的一律放行，
+学历由平台在 URL 层过滤，不花模型调用；日薪 / 月薪和城市是**卡片级**兜底，读不出来的一律放行，
 宁可漏掉不误杀。`min_daily_wage` 和 `education` 可以在 QQ / 命令行上临时覆盖，不必改文件。
+
+**无简历模式**：`[resume].required = false` + `[job_filter].require_fit = false`。
+不读 `resume/kb.md`、不判 `fit`，只按城市 / 月薪 / 非实习等硬条件筛；提示词也会去掉整套匹配规则。
+爸妈版就是这套组合。
 
 **第 2 层：档位 + 地点软排序**
 
@@ -316,12 +370,15 @@ prefer_district_bonus = 1.0
 
 ### 薪资折算
 
-一律先折算成**日薪**再比，月薪按 **21.75** 天/月（`work_days_per_month`）：
+一律先折算成**日薪**再比，月薪按 **21.75** 天/月（`work_days_per_month`）。
+`min_monthly_wage` 比较的是「折算后日薪最低值 × 21.75」，也就是月薪区间的下限：
 
 | 原始写法 | 折算结果 |
 |---|---|
 | `400-500元/天` | 400–500，中位 450 |
-| `6-8K` | 276–368，中位 322 |
+| `6-8K` | 276–368，中位 322；月薪最低 6000 |
+| `5-8K` | 230–368，中位 299；月薪最低 5000 |
+| `4-6K` | 184–276；月薪最低 4000（`min_monthly_wage=5000` 会拦） |
 | `13-26K·14薪` | 先按 14 个月年化，再摊到日 |
 | `20-30万/年` | 767–1149 |
 | `面议` | 解析不出 → 默认跳过 |
@@ -346,20 +403,25 @@ prefer_district_bonus = 1.0
 
 ## 日常使用
 
-双击 `daily_greet.bat`（= `python run.py greet --auto`），不需要盯着：
+本人版双击 `daily_greet.bat`（= `python run.py greet --auto`）；
+爸妈版双击 `daily_greet_parents.bat`（= `python run.py --config config.parents.toml greet --auto`）。
+两个都不需要盯着：
 
 - **停在平台额度上**：每次点完读一遍页面文字，出现「次数已用完」「已达上限」就停。
 - **出错自动重启**：CDP 断线、模型调用失败 → 等 60 秒重开，最多连续 5 次；已发过的不会重发。
-- **这些情况会停下等你**：验证码（人工过掉后重跑）、登录失效（先 `python run.py login`）。
-- **日志**在 `logs/greet_<时间>.log`，截图在 `shots/<run_id>/`。
+- **这些情况会停下等你**：验证码（人工过掉后重跑）、登录失效（先 `python run.py login`，
+  爸妈版是 `python run.py --config config.parents.toml login`）。
+- **日志**：本人版在 `logs/greet_<时间>.log` / `shots/<run_id>/`；
+  爸妈版在 `data/parents/logs/` / `data/parents/shots/`。
 
 每天定时跑，用 Windows 任务计划程序（路径按实际改）：
 
 ```
 schtasks /Create /TN auto_boss /SC DAILY /ST 09:05 /TR "C:\path\to\Auto_BOSS_Visual\daily_greet.bat"
+schtasks /Create /TN auto_boss_parents /SC DAILY /ST 10:05 /TR "C:\path\to\Auto_BOSS_Visual\daily_greet_parents.bat"
 ```
 
-浏览器保持登录态（独立 profile 会记住），电脑别睡眠。
+浏览器保持登录态（各自的独立 profile 会记住），电脑别睡眠。
 
 ---
 
@@ -448,15 +510,18 @@ bot 出现未预期异常时会自动把最近日志推给大号；**断网时�
 | confidence 普遍很低 | 把 `deepseek.thinking` 设成 `true`，更慢但更稳 |
 | 停在验证码上 | 正常行为，人工过掉后重跑，去重库保证不会重发 |
 | 判档不准 | 改 `resume/kb.md`：给岗位族补 JD 原词、在「明确不投」里写清容易混淆的方向 |
+| 两个账号好像投串了 | 确认命令带了 `--config config.parents.toml`；爸妈版数据应在 `data/parents/`、Edge profile 是 `browser_profile_parents/` |
+| 爸妈版提示「找不到求职者画像」 | 检查 `config.parents.toml` 的 `[resume].required` 是否为 `false`、`[job_filter].require_fit` 是否为 `false` |
 
 ## 测试
 
 ```bash
-python tests/test_filters.py       # 筛选规则（薪资折算、学历、实习、档位）
+python tests/test_filters.py       # 筛选规则（薪资折算、学历、实习、档位、月薪下限）
 python tests/test_preferences.py   # 学历 / 薪资指令解析与持久化
 python tests/test_agent_flow.py    # 状态机（浏览器 / 模型全打桩，不碰网络）
 python tests/test_auto.py          # --auto 重启逻辑
 python tests/test_qq.py            # QQ 推送与遥控（假 OneBot 服务）
+python tests/test_config.py        # 多账号路径隔离 / 无简历提示词
 ```
 
 ## 目录结构
@@ -464,17 +529,18 @@ python tests/test_qq.py            # QQ 推送与遥控（假 OneBot 服务）
 ```
 Auto_BOSS_Visual/
 ├── run.py                  CLI 入口（doctor / login / greet / stats / bot）
-├── config.toml             配置：职位来源、筛选条件、限流、安全开关、QQ
+├── config.toml             本人版配置：职位来源、筛选条件、限流、安全开关、QQ
+├── config.parents.toml     ★ 爸妈版：上海 / 无简历 / 月薪 ≥5000 / 独立 Edge profile
 ├── .env.example            复制成 .env 填 key（.env 不提交）
 ├── resume/
 │   ├── kb.example.md       求职者画像示例
-│   └── kb.md               ★ 你自己的画像（不提交）
+│   └── kb.md               ★ 你自己的画像（不提交；爸妈版不需要）
 ├── autoboss/
 │   ├── agent.py            主控状态机
 │   ├── browser.py          浏览器启动 + 原生 CDP 驱动 + 断线重连 + 可信输入事件
 │   ├── vision.py           视觉定位：一次定位 + 局部放大复核
 │   ├── overlay.py          网格标尺 / 区域加密网格（页面内 canvas）
-│   ├── prompts.py          所有提示词模板
+│   ├── prompts.py          所有提示词模板（有简历 / 无简历两套）
 │   ├── filters.py          薪资折算 + 硬条件 + 档位 / 地点排序（纯函数）
 │   ├── deepseek.py         DeepSeek 客户端（纯 urllib，含多模态与重试）
 │   ├── humanize.py         贝塞尔鼠标轨迹、三角分布间隔
@@ -484,18 +550,22 @@ Auto_BOSS_Visual/
 │   ├── preferences.py      学历 / 日薪的解析、持久化与展示（agent、QQ、CLI 共用）
 │   ├── qq.py / qqbot.py    OneBot 推送 / QQ 遥控
 │   ├── qqlaunch.py         自动拉起 SnowLuma 和 QQ
-│   └── config.py           配置加载（tomllib + .env 解析）
+│   └── config.py           配置加载（tomllib + .env 解析）+ 多账号数据目录
 ├── docs/
 │   ├── commands.html       指令表源文件（dsh-pet 桌宠版）
 │   ├── commands.png        指令表截图（README 引用）
 │   └── dsh-pet.png         桌宠形象（来自 dsh-pet 插件，MIT）
 ├── tests/
-├── daily_greet.bat         无人值守投递
+├── daily_greet.bat         本人版无人值守投递
+├── daily_greet_parents.bat 爸妈版无人值守投递
+├── login_parents.bat       爸妈版首次扫码登录
 └── start_bot.bat           启动 QQ 机器人
 ```
 
-运行时还会生成 `browser_profile/`（登录态）、`shots/`、`logs/`、`autoboss.db`，都不会被提交。
-万一账号出问题，`autoboss.db` 里的 `greeted` / `events` 表是复盘和申诉的依据，`python run.py stats` 可以直接看。
+运行时还会生成 `browser_profile/`（本人登录态）、`browser_profile_parents/`（爸妈登录态）、
+`data/parents/`（爸妈数据库 / 日志 / 截图）、`shots/`、`logs/`、`autoboss.db`，都不会被提交。
+万一账号出问题，对应的 `autoboss.db` 里的 `greeted` / `events` 表是复盘和申诉的依据，
+`python run.py stats` 可以直接看（爸妈版加 `--config config.parents.toml`）。
 
 ## 成本
 

@@ -1,0 +1,140 @@
+# ============================================================
+#  爸妈版配置：上海、无简历、月薪 5000 以上
+#
+#  用法（和默认的本人版完全独立，Edge 登录态也分开）：
+#    python run.py --config config.parents.toml doctor
+#    python run.py --config config.parents.toml login
+#    python run.py --config config.parents.toml greet --limit 1
+#    python run.py --config config.parents.toml greet --live --limit 1 --yes
+#    python run.py --config config.parents.toml greet --auto
+#
+#  数据（数据库 / 日志 / 截图）在 data/parents/；
+#  Edge profile 在 browser_profile_parents/。
+# ============================================================
+
+[app]
+name        = "parents"
+description = "爸妈：上海，无简历，月薪 ≥5000"
+data_dir    = "data/parents"
+
+
+[deepseek]
+# 和本人版共用 .env 里的 DEEPSEEK_API_KEY；想用另一个 key 就改 api_key_env。
+api_key_env = "DEEPSEEK_API_KEY"
+base_url    = "https://api.deepseek.com"
+text_model   = "deepseek-flash"
+vision_model = "deepseek-flash"
+timeout_sec  = 120
+thinking     = false
+
+
+# ============================================================
+#  职位来源
+# ============================================================
+[source]
+# 只按关键词搜，不点推荐流：无简历模式没有「求职意向」可参考，关键词更可控。
+mode = "search"
+recommend_last = true
+expect_tabs = []
+
+
+[search]
+# ★ 按爸妈实际能做的岗位删改 ★
+# 下面只是宽口径的上海常见岗位；无简历模式不判匹配度，
+# 关键词只决定去哪找，具体投不投由城市 / 月薪 / 非实习等硬条件决定。
+queries = [
+    "普工", "操作工", "包装工", "仓管", "理货员",
+    "叉车", "司机", "保安", "保洁", "店员",
+    "收银", "服务员", "客服", "销售", "文员",
+    "行政", "后勤", "物流", "快递", "技工",
+]
+# 留空 = 地址里不带 jobType，让平台返回所有类型，再由 exclude_internship 卡掉实习。
+# （1902 是实习；全职的 jobType 代码各端不完全一致，不写死更稳。）
+job_type = ""
+query = "普工"
+# 上海
+city  = "101020100"
+pages = 1
+
+
+# ============================================================
+#  无简历
+# ============================================================
+[resume]
+required = false
+# 不读画像；留空/不存在都不会拦。
+kb_path = ""
+
+
+# ============================================================
+#  筛选
+# ============================================================
+[job_filter]
+# 不点 BOSS 筛选栏：让平台返回所有类型，程序按卡片标签排除实习。
+boss_filters = []
+
+# 不要实习岗。exclude_internship 是严格的：标题/标签/类型任一处出现实习就跳过。
+require_internship = false
+exclude_internship = true
+
+# 月薪 5000 以上。按区间最低值算：4-6K 会被拦，5-8K 会放行。
+# 日薪下限必须关掉，否则 300 元/天 ≈ 6525 元/月会盖过这里的 5000。
+min_daily_wage   = 0
+min_monthly_wage = 5000
+
+education        = "不限"
+allow_unparsable = false
+require_city     = "上海"
+work_days_per_month = 21.75
+
+# 无简历：不做 fit 判定，硬条件通过就投。
+require_fit = false
+fit_scores = {}
+fit_min_low_wage = {}
+fit_fallback = {}
+
+# 不指定行政区；想优先某个区就填，比如 ["浦东新区", "闵行区"]。
+prefer_districts = []
+prefer_district_bonus = 1.0
+
+
+# ============================================================
+#  浏览器：独立的 Edge profile + 独立调试端口
+# ============================================================
+[browser]
+executable_path = ""
+# 不能和本人版的 9222 冲突；两个 Edge 可以同时开着，但程序用全局锁保证一次只跑一个。
+cdp_port        = 9223
+user_data_dir   = "browser_profile_parents"
+viewport_width  = 1600
+viewport_height = 900
+
+
+# ============================================================
+#  限流
+# ============================================================
+[limits]
+daily_cap         = 100
+min_interval_sec  = 30
+max_interval_sec  = 70
+max_empty_scans   = 6
+max_dry_scans     = 8
+# 连续这么多个关键词都没有可投的就先停；0 = 全部走完。
+max_dry_sources   = 12
+# 爸妈的岗位白天看更合理；凌晨跑最容易触发风控。
+active_hours      = [8, 21]
+
+
+[safety]
+dry_run         = true
+stop_on_captcha = true
+
+
+# ============================================================
+#  QQ 推送：爸妈版默认关掉，避免和本人版的 QQ 指令/通知混在一起
+# ============================================================
+[qq]
+enabled       = false
+notify_each   = false
+auto_launch   = false
+owner_qq      = 0
