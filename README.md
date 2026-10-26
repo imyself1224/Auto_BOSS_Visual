@@ -472,6 +472,7 @@ bot 出现未预期异常时会自动把最近日志推给大号；**断网时�
 ![auto_boss QQ 指令表](docs/commands.png)
 
 > 表格源文件：[docs/commands.html](docs/commands.html)，改完重新截图即可。
+> 这张图是本人版指令表；爸妈版指令见下面的「用 QQ 跑爸妈版」。
 > 桌宠形象来自 [dsh-pet](https://github.com/PC2005-cloud/dsh-pet)（MIT）。
 
 例子（先设条件，再投递）：
@@ -496,6 +497,30 @@ bot 出现未预期异常时会自动把最近日志推给大号；**断网时�
 - 推送不依赖 bot 进程：只要 `[qq].enabled = true` 且填了 `OWNER_QQ`，命令行 / bat 跑 `greet` 也会推送；SnowLuma 没开时投递照常进行。
 - bat、命令行、QQ 三个入口共用一把操作系统文件锁，**同一时间只有一个任务操作浏览器**。
 - 设定值保存在 `.qq_prefs.json`（不提交）；`/配置` 里会显示 `degree=...`，方便核对。
+
+### 用 QQ 跑爸妈版
+
+QQ bot 用**本人版**启动（默认 `config.toml`，`[qq].enabled = true`），
+但可以用 `/爸妈` 指令把**爸妈版**拉起来。bot 会自动给子进程加
+`--config config.parents.toml`，所以用的是另一套 Edge profile 和 `data/parents/`。
+
+```text
+/爸妈 配置          # 先看爸妈版条件：上海 / 无简历 / 月薪 ≥5000
+/爸妈 演练          # 只筛选不发送，默认 5 条
+/爸妈 投递 5        # 实发 5 条
+/爸妈 投递          # 实发，投到平台额度用完
+/爸妈 状态          # 当前任务 + 今日进度
+/爸妈 停止          # 让当前任务收尾
+```
+
+也可以写成 `/投递 爸妈 5`、`/演练 爸妈`，效果一样。
+
+- 用之前先跑一次 `login_parents.bat`（或 `python run.py --config config.parents.toml login`），
+  把爸妈的 BOSS 账号登进 `browser_profile_parents/`。
+- 爸妈版配置里 `[qq].enabled = false`，所以**不会逐条推送**；bot 会在开始时回一条
+  「已启动」、结束时补一条今日统计。本人版的逐条推送不受影响。
+- 两个版本共用一把浏览器锁：本人版在跑时发 `/爸妈 投递` 会被拒绝，先 `/停止`。
+- `/爸妈 停止` 停的是**当前正在跑的那个任务**（不管是本人版还是爸妈版）。
 
 ---
 

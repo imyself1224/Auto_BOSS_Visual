@@ -302,20 +302,91 @@ def test_bot_help_sends_text_and_image_once():
         check_true("提示完整表在图片里", "完整指令表见下图" in text)
 
 
+def test_bot_start_parents_uses_config():
+    """「/爸妈 投递」必须把 --config 放在 greet 前面，子进程才会读爸妈版。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        bot = make_bot(tmp)
+        parent_cfg = Path(tmp) / "config.parents.toml"
+        parent_cfg.write_text(f"""
+[app]
+name = "parents"
+data_dir = "{Path(tmp).as_posix()}/data/parents"
+[browser]
+user_data_dir = "browser_profile_parents"
+cdp_port = 9223
+[resume]
+required = false
+[source]
+mode = "search"
+[search]
+queries = ["普工"]
+city = "101020100"
+[job_filter]
+require_internship = false
+exclude_internship = true
+min_daily_wage = 0
+min_monthly_wage = 5000
+require_city = "上海"
+require_fit = false
+""", encoding="utf-8")
+
+        captured = {}
+
+        class Proc:
+            pid = 4321
+            returncode = None
+
+            def poll(self):
+                return None
+
+        def fake_popen(argv, **kw):
+            captured["argv"] = list(argv)
+            return Proc()
+
+        bot.popen = fake_popen
+        bot._watch = lambda proc: None
+        reply = bot.start(live=True, limit=2, profile="parents")
+        argv = captured["argv"]
+        check("回复标明爸妈版", "爸妈版" in reply, True)
+        check("进程用爸妈版配置", "--config" in argv, True)
+        check("配置路径正确",
+              argv[argv.index("--config") + 1] if "--config" in argv else None,
+              str(parent_cfg))
+        check("--config 在 greet 前面",
+              argv.index("--config") < argv.index("greet") if "--config" in argv else False,
+              True)
+        check("实发走 --auto", "--auto" in argv, True)
+        check("条数参数", argv[argv.index("--limit") + 1] if "--limit" in argv else None, "2")
+        check("记录当前档位", bot.task_profile, "parents")
+        check("使用爸妈数据库", bot.task_cfg.db_path, Path(tmp) / "data" / "parents" / "autoboss.db")
+
+        config_text = bot.parents_config_text()
+        check_true("配置里能看到上海", "上海" in config_text)
+        check_true("配置里能看到月薪 5000", "月薪最低 ≥5000" in config_text)
+        check_true("配置里说明无简历", "无简历模式" in config_text)
+        check_true("状态能按爸妈版查", "爸妈版" in bot.handle("爸妈 状态"))
+        check_true("指令能查爸妈版配置", "月薪" in bot.handle("爸妈 配置"))
+
+
 def test_bot_command_parsing():
     with tempfile.TemporaryDirectory() as tmp:
         bot = make_bot(tmp)
         calls = []
-        bot.start = (lambda live, limit, keywords=None, prefs=None:
-                     calls.append((live, limit, keywords,
-                                   prefs.education, prefs.min_wage)) or "ok")
+        bot.start = (lambda live, limit, keywords=None, prefs=None, profile="self":
+                     calls.append((live, limit, profile)) or "ok")
         bot.handle("投递")
         bot.handle("投递 10")
         bot.handle("演练")
         bot.handle("演练 3")
         check("指令参数解析", calls,
-              [(True, None, None, None, None), (True, 10, None, None, None),
-               (False, 5, None, None, None), (False, 3, None, None, None)])
+              [(True, None, "self"), (True, 10, "self"),
+               (False, 5, "self"), (False, 3, "self")])
+
+        # /投递 爸妈 3 与 /爸妈 投递 3 等价
+        bot.handle("投递 爸妈 3")
+        bot.handle("爸妈 投递 4")
+        check("爸妈版指令解析", calls[-2:],
+              [(True, 3, "parents"), (True, 4, "parents")])
 
         # 投递只接受条数：关键词 / 学历 / 薪资都走单独的指令
         for bad in ("投递 大模型算法 Agent", "投递 本科 300", "投递 abc",
@@ -700,6 +771,7 @@ if __name__ == "__main__":
                test_bot_education_and_salary_commands,
                test_bot_config_command, test_bot_config_reset,
                test_bot_keywords_set_and_clear, test_bot_start_passes_keywords_to_greet,
+               test_bot_start_parents_uses_config,
                test_bot_today_lists_sent_jobs, test_lock_is_exclusive_and_freed_on_kill,
                test_greet_refused_while_browser_busy, test_bot_sees_task_started_elsewhere,
                test_launcher_starts_whats_missing, test_launcher_skips_running_or_disabled,
