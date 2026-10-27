@@ -461,6 +461,9 @@ class QQBot:
         except RuntimeError as exc:
             return f"❌ {exc}"
         education = preferences.education_from_config(cfg) or "不限"
+        prefs = self._prefs(cfg)
+        if prefs.education is not None:
+            education = prefs.education or "不限"
         daily = float(cfg.get("job_filter.min_daily_wage", 0) or 0)
         monthly = float(cfg.get("job_filter.min_monthly_wage", 0) or 0)
         wages = []
@@ -468,18 +471,19 @@ class QQBot:
             wages.append(f"日薪中位 ≥{daily:g}")
         if monthly > 0:
             wages.append(f"月薪最低 ≥{monthly:g}")
-        queries = kw.queries_of(kw.planned_sources(cfg))
+        pending = self.pending_keywords(cfg)
+        queries = kw.queries_of(kw.planned_sources(cfg, pending))
         lines = [
             "👨‍👩‍👧 当前配置（爸妈版）",
             f"城市：{cfg.get('job_filter.require_city') or '不限'}",
             f"薪资：{' · '.join(wages) or '不限'}",
-            f"学历：{education}",
+            f"学历：{education}" + ("（QQ 设定）" if prefs.education is not None else ""),
             "岗位类型：排除实习" if cfg.get("job_filter.exclude_internship", False)
             else "岗位类型：不限",
             f"简历：{'需要' if cfg.get('resume.required', True) else '无简历模式'}",
             f"Edge profile：{cfg.user_data_dir.name}（端口 {cfg.get('browser.cdp_port')}）",
             f"数据目录：{cfg.data_dir}",
-            f"关键词：{len(queries)} 个",
+            f"关键词：{len(queries)} 个" + ("（QQ 设定）" if pending else ""),
         ]
         if queries:
             lines.append(kw.block(queries))
