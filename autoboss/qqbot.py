@@ -227,6 +227,22 @@ class QQBot:
             return False, str(exc) or type(exc).__name__
         return port_open(port), ""
 
+    def _open_boss_page(self, cfg) -> tuple[bool, bool, str]:
+        """切过去后像 `run.py login` 一样打开 BOSS 直聘，方便扫码登录。
+
+        返回 (是否打开成功, 是否已登录, 错误信息)。只负责把页面打开，
+        不在这里等 5 分钟 —— bot 还要继续接群/私聊指令；登录态由用户扫码完成。
+        """
+        try:
+            session = BrowserSession(cfg)
+            page = session.start()
+            page.navigate("https://www.zhipin.com/web/geek/job", settle=4.0)
+            logged_in = page.is_logged_in()
+            session.stop()
+            return True, logged_in, ""
+        except (Exception, SystemExit) as exc:  # noqa: BLE001
+            return False, False, str(exc) or type(exc).__name__
+
     def switch_cmd(self, rest: list[str]) -> str:
         """「/切换」：在本人版 / 爸妈版之间切换，只保留一个 Edge。"""
         if rest:
@@ -264,6 +280,16 @@ class QQBot:
         if not launched:
             lines.append(f"⚠️ {new_label}的 Edge 没启动：{error or '端口未响应'}；"
                          "下次 /投递 会自动再试。")
+        else:
+            opened, logged_in, open_error = self._open_boss_page(new_cfg)
+            if not opened:
+                lines.append("⚠️ BOSS 页面没打开："
+                             f"{open_error or '未知原因'}；请手动在 Edge 打开 "
+                             "https://www.zhipin.com/web/geek/job")
+            elif logged_in:
+                lines.append("BOSS 直聘：已是登录状态。")
+            else:
+                lines.append("BOSS 直聘已打开：请在 Edge 窗口里扫码登录。")
         lines.append("现在 /投递、/演练、/配置、/状态 等都对"
                      f"「{new_label}」生效；同一时间只保留一个 Edge。")
         self.announce_group_started()

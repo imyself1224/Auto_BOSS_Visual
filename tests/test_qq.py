@@ -268,6 +268,7 @@ def make_bot(tmp: str) -> QQBot:
     # 测试不碰真实 Edge：/切换 和 /投递 里的关/开浏览器都打桩
     bot._close_browser = lambda cfg: True
     bot._launch_browser = lambda cfg: (True, "")
+    bot._open_boss_page = lambda cfg: (True, False, "")
     docs = Path(tmp) / "docs"
     docs.mkdir(exist_ok=True)
     (docs / "commands.png").write_bytes(TINY_PNG)
@@ -442,13 +443,17 @@ require_city = "上海"
 require_fit = false
 """, encoding="utf-8")
         closed, launched = [], []
+        opened = []
         bot._close_browser = lambda cfg: closed.append(cfg.name) or True
         bot._launch_browser = lambda cfg: launched.append(cfg.name) or (True, "")
+        bot._open_boss_page = lambda cfg: opened.append(cfg.name) or (True, False, "")
 
         reply = bot.handle("切换")
         check("切到爸妈版", bot.active_profile, "parents")
         check("关掉旧的 Edge", closed, ["self"])
         check("打开新的 Edge", launched, ["parents"])
+        check("打开 BOSS 登录页", opened, ["parents"])
+        check_true("回复提示扫码登录", "扫码登录" in reply)
         check_true("回复说明爸妈版", "爸妈版" in reply)
         check("当前档位已持久化", bot.active_path.read_text(encoding="utf-8").strip(),
               "parents")
