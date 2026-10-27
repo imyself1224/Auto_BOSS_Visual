@@ -10,7 +10,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from autoboss.filters import (  # noqa: E402
-    Rules, evaluate, job_education, looks_like_internship, parse_daily_wage,
+    Rules, evaluate, job_education, job_work_hours, looks_like_internship,
+    parse_daily_wage,
 )
 
 PASSED = 0
@@ -382,6 +383,14 @@ def test_parent_night_shift():
     v = evaluate(_parent_job(title="普工（长白班）", work_hours="8小时/天"),
                  PARENT_RULES)
     check_true("长白班 + 8小时放行", v.ok)
+
+    check("模型给的时长优先", job_work_hours(
+        {"work_hours": "12小时/天", "tags": ["白班"]}), "12小时/天")
+    check("模型没给时从标签补", job_work_hours(
+        {"tags": ["8小时/天", "经验不限"]}), "8小时/天")
+    check("从标题补班次", job_work_hours({"title": "普工（长白班）"}),
+          "长白班")
+    check("都没有就是空", job_work_hours({"title": "普工"}), "")
 
 
 if __name__ == "__main__":

@@ -950,8 +950,8 @@ class GreetAgent:
         title = (job.get("title") or "").strip()
         company = (job.get("company") or "").strip()
         salary = job.get("salary") or ""
-        location = str(job.get("location") or "").strip()
-        work_hours = str(job.get("work_hours") or "").strip()
+        location = str(job.get("location") or job.get("district") or "").strip()
+        work_hours = filters.job_work_hours(job)
         self._attempted.add(job_key(title, company))
         self.log(f"\n  ▸ {title}  @ {company}  {salary}")
 

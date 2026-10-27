@@ -147,6 +147,25 @@ _EDU_WORDS_RE = re.compile(
                     reverse=True)))
 
 
+_WORK_HOURS_RE = re.compile(
+    r"\d+\s*小时(?:\s*/\s*天)?|长白班|白班|夜班|晚班|两班倒|三班倒|倒班|轮班|"
+    r"月休\s*\d+\s*天|\d+\s*天\s*/\s*周")
+
+
+def job_work_hours(job: dict) -> str:
+    """工作时长 / 班次：优先用模型给的 work_hours，缺失时从标签或标题里找一条。"""
+    raw = str(job.get("work_hours") or "").strip()
+    if raw:
+        return raw
+    for text in list(job.get("tags") or []) + [job.get("title") or ""]:
+        text = str(text).strip()
+        if text:
+            m = _WORK_HOURS_RE.search(text)
+            if m:
+                return m.group(0)
+    return ""
+
+
 def job_education(job: dict) -> str:
     """卡片上写的**岗位学历要求**，规范名；读不到返回空串。
 
