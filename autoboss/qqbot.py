@@ -903,18 +903,20 @@ class QQBot:
         icon = "✅" if code == 0 else "⚠️"
         lines = [f"{icon} {self.profile_label(profile)}任务结束（退出码 {code}）", body]
 
-        # 爸妈版不逐条推送，结束时把今天真正发出去的岗位按
-        # 「工作岗位 / 工作时长 / 工作地点」列出来。
-        sent = self._query(
-            "SELECT title, company, location, work_hours FROM greeted "
-            "WHERE status='sent' AND substr(greeted_at,1,10)=? ORDER BY greeted_at",
+        # 爸妈版不逐条推送，结束时把今天找到的岗位按
+        # 「工作岗位 / 工作时长 / 工作地点」列出来；演练的也列，标注未发送。
+        found = self._query(
+            "SELECT title, company, location, work_hours, status FROM greeted "
+            "WHERE status IN ('sent', 'dry_run') "
+            "AND substr(greeted_at,1,10)=? ORDER BY greeted_at",
             (self._today(),), cfg=cfg)
-        if sent:
+        if found:
             lines.append("")
-            lines.append("今天找到并沟通过的岗位：")
-            for i, (title, company, location, work_hours) in enumerate(
-                    sent[:MAX_LINES], 1):
-                lines.append(f"{i}. 工作岗位：{title}")
+            lines.append("今天找到的岗位：")
+            for i, (title, company, location, work_hours, status) in enumerate(
+                    found[:MAX_LINES], 1):
+                mark = "（演练，未发送）" if status == "dry_run" else ""
+                lines.append(f"{i}. 工作岗位：{title}{mark}")
                 lines.append(f"   工作时长：{work_hours or '未标注'}")
                 lines.append(f"   工作地点：{location or '未标注'}")
                 lines.append(f"   公司：{company}")
