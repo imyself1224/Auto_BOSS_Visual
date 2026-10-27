@@ -485,6 +485,41 @@ require_fit = false
         bot.proc = None
 
 
+def test_switch_opens_boss_page():
+    from unittest import mock
+
+    calls = {}
+
+    class Page:
+        def navigate(self, url, settle=0):
+            calls["url"] = url
+
+        def is_logged_in(self):
+            return False
+
+    class Session:
+        def __init__(self, cfg):
+            calls["cfg"] = cfg
+
+        def start(self):
+            return Page()
+
+        def stop(self):
+            calls["stopped"] = True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        bot = make_bot(tmp)
+        del bot._open_boss_page       # 去掉 make_bot 的桩，测真实方法
+        with mock.patch("autoboss.qqbot.BrowserSession", Session):
+            ok, logged_in, error = bot._open_boss_page(bot.cfg)
+        check("打开 BOSS 页面成功", ok, True)
+        check("返回登录状态", logged_in, False)
+        check("没有错误", error, "")
+        check("打开的是 BOSS 职位页", calls.get("url"),
+              "https://www.zhipin.com/web/geek/job")
+        check("打开后断开 CDP、不关浏览器", calls.get("stopped"), True)
+
+
 def test_bot_group_control():
     with tempfile.TemporaryDirectory() as tmp:
         bot = make_bot(tmp)
@@ -979,6 +1014,7 @@ if __name__ == "__main__":
                test_bot_config_command, test_bot_config_reset,
                test_bot_keywords_set_and_clear, test_bot_start_passes_keywords_to_greet,
                test_bot_start_parents_uses_config, test_bot_switch_profile,
+               test_switch_opens_boss_page,
                test_bot_group_control, test_bot_group_switch_announcement,
                test_bot_today_lists_sent_jobs, test_lock_is_exclusive_and_freed_on_kill,
                test_greet_refused_while_browser_busy, test_bot_sees_task_started_elsewhere,
