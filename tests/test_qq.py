@@ -299,11 +299,13 @@ def test_bot_help_sends_text_and_image_once():
         for cmd in ("/状态", "/今日", "/统计", "/日志", "/重启", "/关机",
                     "/取消", "/帮助"):
             check(f"文本里不重复介绍 {cmd}", cmd in text, False)
+        check_true("帮助文本用 /切换", "/切换" in text)
+        check("帮助文本不再写 /爸妈", "/爸妈" in text, False)
         check_true("提示完整表在图片里", "完整指令表见下图" in text)
 
 
 def test_bot_start_parents_uses_config():
-    """「/爸妈 投递」必须把 --config 放在 greet 前面，子进程才会读爸妈版。"""
+    """「/切换 投递」必须把 --config 放在 greet 前面，子进程才会读爸妈版。"""
     with tempfile.TemporaryDirectory() as tmp:
         bot = make_bot(tmp)
         parent_cfg = Path(tmp) / "config.parents.toml"
@@ -364,8 +366,9 @@ require_fit = false
         check_true("配置里能看到上海", "上海" in config_text)
         check_true("配置里能看到月薪 5000", "月薪最低 ≥5000" in config_text)
         check_true("配置里说明无简历", "无简历模式" in config_text)
-        check_true("状态能按爸妈版查", "爸妈版" in bot.handle("爸妈 状态"))
-        check_true("指令能查爸妈版配置", "月薪" in bot.handle("爸妈 配置"))
+        check_true("状态能按爸妈版查", "爸妈版" in bot.handle("切换 状态"))
+        check_true("指令能查爸妈版配置", "月薪" in bot.handle("切换 配置"))
+        check_true("旧写法 /爸妈 仍兼容", "爸妈版" in bot.handle("爸妈 状态"))
 
 
 def test_bot_command_parsing():
@@ -382,11 +385,13 @@ def test_bot_command_parsing():
               [(True, None, "self"), (True, 10, "self"),
                (False, 5, "self"), (False, 3, "self")])
 
-        # /投递 爸妈 3 与 /爸妈 投递 3 等价
-        bot.handle("投递 爸妈 3")
-        bot.handle("爸妈 投递 4")
+        # /投递 切换 3 与 /切换 投递 3 等价
+        bot.handle("投递 切换 3")
+        bot.handle("切换 投递 4")
         check("爸妈版指令解析", calls[-2:],
               [(True, 3, "parents"), (True, 4, "parents")])
+        bot.handle("爸妈 投递 5")       # 旧写法仍兼容
+        check("旧 /爸妈 写法也认", calls[-1], (True, 5, "parents"))
 
         # 投递只接受条数：关键词 / 学历 / 薪资都走单独的指令
         for bad in ("投递 大模型算法 Agent", "投递 本科 300", "投递 abc",

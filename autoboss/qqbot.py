@@ -44,28 +44,29 @@ HELP = """🤖 auto_boss 投递指令
 /薪资（日薪/不限）   日薪下限，如 /薪资 300；也认 月薪8000 / 8k
 /关键词（词.../清空） 检索关键词，如 /关键词 大模型算法 Agent
 /配置（清空）       查看当前配置；清空 = 恢复最开始的状态
-/爸妈 投递（条数）   用爸妈版配置实发（上海 / 无简历 / 月薪 ≥5000）
-/爸妈 演练（条数）   用爸妈版配置只筛选不发送
-/爸妈 状态 / 配置 / 停止 / 今日 / 统计 / 日志
+/切换 投递（条数）   用爸妈版配置实发（上海 / 无简历 / 月薪 ≥5000）
+/切换 演练（条数）   用爸妈版配置只筛选不发送
+/切换 状态 / 配置 / 停止 / 今日 / 统计 / 日志
 /停止              让正在跑的任务收尾退出
 
-也可以直接发「/投递 爸妈 10」。
-完整指令表见下图（爸妈版发「/爸妈 帮助」）。"""
+也可以直接发「/投递 切换 10」。
+完整指令表见下图（爸妈版发「/切换 帮助」）。"""
 
-PARENTS_HELP = """👨‍👩‍👧 爸妈版指令
+PARENTS_HELP = """👨‍👩‍👧 爸妈版指令（/切换）
 
-/爸妈 投递（条数）   实发，不写条数就投到平台额度用完
-/爸妈 演练（条数）   只筛选不发送（默认 5 条）
-/爸妈 状态          看当前任务 / 今日进度
-/爸妈 配置          看爸妈版条件（上海 / 无简历 / 月薪 ≥5000）
-/爸妈 停止          让正在跑的任务收尾退出
-/爸妈 今日 / 统计 / 日志
+/切换 投递（条数）   实发，不写条数就投到平台额度用完
+/切换 演练（条数）   只筛选不发送（默认 5 条）
+/切换 状态          看当前任务 / 今日进度
+/切换 配置          看爸妈版条件（上海 / 无简历 / 月薪 ≥5000）
+/切换 停止          让正在跑的任务收尾退出
+/切换 今日 / 统计 / 日志
 
-也可以直接发「/投递 爸妈 10」。"""
+也可以直接发「/投递 切换 10」。"""
 
 DEFAULT_PROFILE = "self"
 # 爸妈版的指令别名。normalize 后统一成 "parents"。
-PARENT_ALIASES = ("爸妈", "父母", "parents", "parent")
+# 主指令是「切换」；旧的「爸妈 / 父母 / parents」继续兼容。
+PARENT_ALIASES = ("切换", "爸妈", "父母", "parents", "parent")
 PARENTS_CONFIG = "config.parents.toml"
 
 def cq_unescape(text: str) -> str:
@@ -297,7 +298,7 @@ class QQBot:
 
         if cmd in ("帮助", "help", "菜单", "?", "？"):
             return HELP
-        # /爸妈 ...：走 config.parents.toml，和本人版完全隔离
+        # /切换 ...：走 config.parents.toml，和本人版完全隔离
         if cmd in PARENT_ALIASES:
             return self.parents_cmd(rest)
         if cmd in ("投递", "开始", "start"):
@@ -337,7 +338,7 @@ class QQBot:
     #  爸妈版指令
     # ------------------------------------------------------------------
     def parents_cmd(self, rest: list[str]) -> str:
-        """「/爸妈 ...」：用独立配置/Edge profile 跑爸妈版。"""
+        """「/切换 ...」：用独立配置/Edge profile 跑爸妈版。"""
         rest = list(rest)
         if not rest:
             return PARENTS_HELP
@@ -345,7 +346,7 @@ class QQBot:
         if sub in ("帮助", "help", "菜单", "?", "？"):
             return PARENTS_HELP
         if sub.isdigit():
-            # /爸妈 10 = 实发 10 条
+            # /切换 10 = 实发 10 条
             return self.task_cmd(rest, live=True, profile="parents")
         if sub in ("投递", "开始", "start"):
             return self.task_cmd(rest[1:], live=True, profile="parents")
@@ -364,10 +365,10 @@ class QQBot:
         if sub in ("日志", "log"):
             n = self._int(rest[1], 15) if len(rest) > 1 else 15
             return self.log_tail(min(n or 15, MAX_LINES), profile="parents")
-        return f"不认识的爸妈版指令「{rest[0]}」。\n\n{PARENTS_HELP}"
+        return f"不认识的切换指令「{rest[0]}」。\n\n{PARENTS_HELP}"
 
     def parents_config_text(self) -> str:
-        """「/爸妈 配置」：只列爸妈版真正生效的条件，避免和本人版看串。"""
+        """「/切换 配置」：只列爸妈版真正生效的条件，避免和本人版看串。"""
         try:
             cfg = self.profile_cfg("parents")
         except RuntimeError as exc:
@@ -396,7 +397,7 @@ class QQBot:
         if queries:
             lines.append(kw.block(queries))
         lines.append("")
-        lines.append("直接发「/爸妈 投递」（实发）或「/爸妈 演练」（只筛不发）。")
+        lines.append("直接发「/切换 投递」（实发）或「/切换 演练」（只筛不发）。")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -499,7 +500,7 @@ class QQBot:
 
         关键词、学历、薪资都是单独的指令（/关键词、/学历、/薪资）设定的，
         这样 /投递 的语义永远只有「发多少条」一件事。
-        `/投递 爸妈 10` 和 `/爸妈 投递 10` 等价。
+        `/投递 切换 10` 和 `/切换 投递 10` 等价。
         """
         rest = list(rest)
         if rest and rest[0].lower() in PARENT_ALIASES:
