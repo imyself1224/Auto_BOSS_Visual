@@ -901,7 +901,24 @@ class QQBot:
                            (self._today(),), cfg=cfg)
         body = " · ".join(f"{names.get(s, s)} {n}" for s, n in rows) or "今日还没有动作"
         icon = "✅" if code == 0 else "⚠️"
-        return f"{icon} {self.profile_label(profile)}任务结束（退出码 {code}）\n{body}"
+        lines = [f"{icon} {self.profile_label(profile)}任务结束（退出码 {code}）", body]
+
+        # 爸妈版不逐条推送，结束时把今天真正发出去的岗位按
+        # 「工作岗位 / 工作时长 / 工作地点」列出来。
+        sent = self._query(
+            "SELECT title, company, location, work_hours FROM greeted "
+            "WHERE status='sent' AND substr(greeted_at,1,10)=? ORDER BY greeted_at",
+            (self._today(),), cfg=cfg)
+        if sent:
+            lines.append("")
+            lines.append("今天找到并沟通过的岗位：")
+            for i, (title, company, location, work_hours) in enumerate(
+                    sent[:MAX_LINES], 1):
+                lines.append(f"{i}. 工作岗位：{title}")
+                lines.append(f"   工作时长：{work_hours or '未标注'}")
+                lines.append(f"   工作地点：{location or '未标注'}")
+                lines.append(f"   公司：{company}")
+        return "\n".join(lines)
 
     def _watch(self, proc: subprocess.Popen):
         """等子进程退出：超过停止宽限期就强杀；退出后清标记、报告异常退出。"""
@@ -999,17 +1016,27 @@ class QQBot:
         cfg = self.profile_cfg(profile or self.active_profile)
         label = self.profile_label(profile or self.active_profile)
         rows = self._query(
-            "SELECT title, company, salary, greeted_at FROM greeted "
-            "WHERE status='sent' AND substr(greeted_at,1,10)=? ORDER BY greeted_at",
+            "SELECT title, company, salary, location, work_hours, greeted_at "
+            "FROM greeted WHERE status='sent' "
+            "AND substr(greeted_at,1,10)=? ORDER BY greeted_at",
             (self._today(),), cfg=cfg)
+        if not rows:
+            # 旧数据库还没补 location / work_hours 列时，退回旧查询（任务一跑就会自动补列）
+            rows = [(t, c, s, "", "", at) for t, c, s, at in self._query(
+                "SELECT title, company, salary, greeted_at FROM greeted "
+                "WHERE status='sent' AND substr(greeted_at,1,10)=? ORDER BY greeted_at",
+                (self._today(),), cfg=cfg)]
         if not rows:
             return f"{label}今天还没有投递" if label != "本人版" else "今天还没有投递"
         lines = [f"📋 {label}今日已投 {len(rows)} 条" if label != "本人版"
                  else f"📋 今日已投 {len(rows)} 条"]
-        for i, (title, company, salary, at) in enumerate(rows[-MAX_LINES:],
-                                                         max(len(rows) - MAX_LINES, 0) + 1):
+        for i, (title, company, salary, location, work_hours, at) in enumerate(
+                rows[-MAX_LINES:], max(len(rows) - MAX_LINES, 0) + 1):
             lines.append(f"{i}. {at[11:16]} {title} @ {company}"
                          + (f"（{salary}）" if salary else ""))
+            if location or work_hours:
+                lines.append(f"   工作时长：{work_hours or '未标注'} · "
+                             f"工作地点：{location or '未标注'}")
         if len(rows) > MAX_LINES:
             lines.insert(1, f"（只列最近 {MAX_LINES} 条）")
         return "\n".join(lines)

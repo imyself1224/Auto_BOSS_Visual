@@ -60,6 +60,15 @@ def test_parents_profile():
     check("日薪下限关掉", float(cfg.get("job_filter.min_daily_wage")), 0.0)
     check("上海城市代码", str(cfg.get("search.city")), "101020100")
     check("城市必须含上海", cfg.get("job_filter.require_city"), "上海")
+    queries = [str(q) for q in (cfg.get("search.queries", []) or [])]
+    for word in ("大龄工", "工地", "工厂", "白班", "长白班"):
+        check_true(f"关键词包含 {word}", word in queries)
+    check("不要夜班", cfg.get("job_filter.exclude_night_shift"), True)
+    context = str(cfg.get("prompt.worker_context") or "")
+    check_true("prompt 写爸爸 54 岁", "54" in context)
+    check_true("prompt 写妈妈 55 岁", "55" in context)
+    check_true("prompt 写不要夜班", "夜班" in context)
+    check_true("prompt 要求工作时长", "work_hours" in context)
 
 
 def test_relative_path():
@@ -80,6 +89,10 @@ def test_no_resume_prompt():
     check_true("有简历提示词带 fit 字段", '"fit"' in with_fit)
     check_true("有简历提示词带档位", "最匹配" in with_fit)
     check_true("无简历提示词更短", len(no_fit) < len(with_fit))
+    ctx = prompts.list_user("", require_fit=False, context="爸爸 54 岁，妈妈 55 岁")
+    check_true("找工上下文拼进提示词", "54 岁" in ctx and "55 岁" in ctx)
+    check_true("提示词要求读取 work_hours", "work_hours" in ctx)
+    check_true("无简历提示词也要求工作地点", "location" in no_fit)
 
 
 def test_store_creates_data_dir():

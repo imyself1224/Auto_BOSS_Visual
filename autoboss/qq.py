@@ -210,7 +210,16 @@ class Notifier:
         except OSError as exc:
             print(f"  [qq] 通知发不出去，也存不进 outbox（{exc}）")
 
-    def job_sent(self, title: str, company: str, salary: str, total: int, cap: int):
+    def job_sent(self, title: str, company: str, salary: str, total: int, cap: int,
+                 location: str = "", work_hours: str = ""):
         if self.notify_each:
-            self.send(f"✅ 已投递（今日第 {total} 条）\n{title}\n@ {company}"
-                      + (f"\n💰 {salary}" if salary else ""))
+            lines = [
+                f"✅ 已投递（今日第 {total} 条）",
+                f"工作岗位：{title}",
+                f"工作时长：{work_hours or '未标注'}",
+                f"工作地点：{location or '未标注'}",
+                f"@ {company}",
+            ]
+            if salary:
+                lines.append(f"💰 {salary}")
+            self.send("\n".join(lines))

@@ -94,7 +94,8 @@ def test_notifier_sends_private_msg():
     fake = FakeOneBot()
     try:
         n = Notifier(make_cfg(fake.port))
-        n.job_sent("Agent算法实习生", "百度", "400-500元/天", 3, 200)
+        n.job_sent("Agent算法实习生", "百度", "400-500元/天", 3, 200,
+                   location="上海·浦东新区", work_hours="8小时/天")
         wait_for(lambda: fake.received)
         check("收到 1 个动作", len(fake.received), 1)
         act = fake.received[0] if fake.received else {}
@@ -103,6 +104,8 @@ def test_notifier_sends_private_msg():
         msg = act.get("params", {}).get("message", "")
         check_true("消息里有岗位和公司", "Agent算法实习生" in msg and "百度" in msg)
         check_true("消息里有今日计数", "第 3 条" in msg)
+        check_true("消息里有工作时长", "工作时长：8小时/天" in msg)
+        check_true("消息里有工作地点", "工作地点：上海·浦东新区" in msg)
         check("带上 access token", fake.auth[0] if fake.auth else None, "Bearer secret")
     finally:
         fake.close()
@@ -175,7 +178,7 @@ def test_agent_notifies_each_sent_job():
         def __init__(self):
             self.jobs = []
 
-        def job_sent(self, title, company, salary, total, cap):
+        def job_sent(self, title, company, salary, total, cap, **kwargs):
             self.jobs.append((title, company, total))
 
     scene = {"page_state": "job_list", "jobs": [GOOD_JOB]}
@@ -660,18 +663,21 @@ def test_bot_today_lists_sent_jobs():
         check_true("没库时也能回", "还没有" in bot.handle("今日"))
         conn = sqlite3.connect(str(Path(tmp) / "t.db"))
         conn.execute("CREATE TABLE greeted (job_key TEXT PRIMARY KEY, title TEXT, "
-                     "company TEXT, salary TEXT, message TEXT, status TEXT, note TEXT, "
-                     "greeted_at TEXT)")
+                     "company TEXT, salary TEXT, location TEXT, work_hours TEXT, "
+                     "message TEXT, status TEXT, note TEXT, greeted_at TEXT)")
         now = datetime.now().isoformat(timespec="seconds")
-        conn.executemany("INSERT INTO greeted VALUES (?,?,?,?,?,?,?,?)", [
-            ("a", "Agent算法实习生", "百度", "400元/天", "", "sent", "", now),
-            ("b", "数据标注", "某司", "", "", "filtered", "", now),
-            ("c", "推荐算法实习", "字节", "", "", "sent", "", "2020-01-01T10:00:00"),
+        conn.executemany("INSERT INTO greeted VALUES (?,?,?,?,?,?,?,?,?,?)", [
+            ("a", "Agent算法实习生", "百度", "400元/天", "上海·浦东新区", "8小时/天",
+             "", "sent", "", now),
+            ("b", "数据标注", "某司", "", "", "", "", "filtered", "", now),
+            ("c", "推荐算法实习", "字节", "", "", "", "", "sent", "", "2020-01-01T10:00:00"),
         ])
         conn.commit()
         conn.close()
         reply = bot.handle("今日")
         check_true("列出今天发出的", "Agent算法实习生 @ 百度" in reply)
+        check_true("列出工作时长", "工作时长：8小时/天" in reply)
+        check_true("列出工作地点", "工作地点：上海·浦东新区" in reply)
         check_true("不列被过滤的", "数据标注" not in reply)
         check_true("不列往日的", "字节" not in reply)
         check_true("计数正确", "今日已投 1 条" in reply)

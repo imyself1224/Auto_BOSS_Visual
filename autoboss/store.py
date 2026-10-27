@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS greeted (
     title       TEXT,
     company     TEXT,
     salary      TEXT,
+    location    TEXT,
+    work_hours  TEXT,
     message     TEXT,
     status      TEXT,      -- sent / dry_run / failed / skipped
     note        TEXT,
@@ -68,6 +70,11 @@ class Store:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.path))
         self.conn.executescript(_SCHEMA)
+        # 旧数据库补列：location / work_hours 是后加的，不能要求用户重建库
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(greeted)")}
+        for name in ("location", "work_hours"):
+            if name not in cols:
+                self.conn.execute(f"ALTER TABLE greeted ADD COLUMN {name} TEXT")
         self.conn.commit()
         self.conn.execute(
             "INSERT OR REPLACE INTO runs (run_id, started_at) VALUES (?, ?)",
@@ -108,14 +115,17 @@ class Store:
 
     # --- 记录 --------------------------------------------------------
     def record(self, title: str, company: str, salary: str, message: str,
-               status: str, note: str = ""):
+               status: str, note: str = "", location: str = "",
+               work_hours: str = ""):
         self.conn.execute(
             "INSERT OR REPLACE INTO greeted "
-            "(job_key, title, company, salary, message, status, note, greeted_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "(job_key, title, company, salary, location, work_hours, message, "
+            "status, note, greeted_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                job_key(title, company), title, company, salary, message,
-                status, note, datetime.now().isoformat(timespec="seconds"),
+                job_key(title, company), title, company, salary, location,
+                work_hours, message, status, note,
+                datetime.now().isoformat(timespec="seconds"),
             ),
         )
         self.conn.commit()

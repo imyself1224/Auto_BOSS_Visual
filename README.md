@@ -104,7 +104,10 @@ python run.py --config config.parents.toml greet --auto
 也可以双击 `login_parents.bat` 登录、`daily_greet_parents.bat` 无人值守。
 
 第一次先把 `config.parents.toml` 的 `[search].queries` 改成爸妈实际能做的岗位；
-默认是上海常见的宽口径词（普工 / 操作工 / 仓管 / 司机 / 保安 / 保洁 / 店员 / 客服 …）。
+默认已经放了大龄工 / 大龄 / 工地 / 工厂 / 厂里 / 白班 / 长白班，再加上普工、仓管、保安、保洁等宽口径词。
+`[job_filter].exclude_night_shift = true` 会把标题/标签/工作时长里出现「夜班、晚班、两班倒、三班倒、倒班」的岗位直接跳过。
+`[prompt].worker_context` 已写明爸爸 54 岁、妈妈 55 岁、优先岗位和不要夜班；
+读取卡片时会重点返回 **工作岗位（title）/ 工作时长（work_hours）/ 工作地点（location）**。
 
 > 两个账号**不要同时跑**：程序用一把全局浏览器锁，保证同一时间只有一个窗口在操作。
 > 两个 Edge profile 仍然独立，但程序同一时间只保留一个 Edge；`/切换` 时先关当前 Edge 再打开另一个。
@@ -342,6 +345,7 @@ QQ 上设的条件存在项目根目录的 `.qq_prefs.json`（已在 `.gitignore
 |---|---|---|
 | `require_internship` | `true` | 只要实习岗（看标题和标签，校招全职不算） |
 | `exclude_internship` | `false` | 爸妈版用：排除实习岗（标题 / 标签 / 类型任一处出现实习就跳过） |
+| `exclude_night_shift` | `false` | 爸妈版用：排除夜班 / 倒班岗（标题 / 标签 / `work_hours` 里出现夜班、晚班、两班倒、三班倒、倒班就跳过） |
 | `min_daily_wage` | `300` | 日薪下限，**区间取中位数**；`0` = 不限。BOSS 没有日薪档，由程序按卡片薪资精确比较 |
 | `min_monthly_wage` | `0` | 月薪下限，**按折算后月薪区间的最低值**比较；`0` = 不限。和日薪下限可只开一个 |
 | `education` | `"不限"` | 岗位学历档位（不限 / 大专 / 本科 / 硕士 / 博士），拼成 URL 的 `degree` 参数（如硕士 = `204`）。设了具体档位后 BOSS 会排除「学历不限」的岗位 |
@@ -354,7 +358,8 @@ QQ 上设的条件存在项目根目录的 `.qq_prefs.json`（已在 `.gitignore
 
 **无简历模式**：`[resume].required = false` + `[job_filter].require_fit = false`。
 不读 `resume/kb.md`、不判 `fit`，只按城市 / 月薪 / 非实习等硬条件筛；提示词也会去掉整套匹配规则。
-爸妈版就是这套组合。
+爸妈版就是这套组合；另外可用 `[prompt].worker_context` 把年龄、优先岗位、不要夜班等说明拼进提示词，
+并要求模型把工作岗位 / 工作时长 / 工作地点读准。
 
 **第 2 层：档位 + 地点软排序**
 
@@ -519,7 +524,8 @@ QQ bot 同时管理两套配置，但**同一时间只开一个 Edge**：
 - 用之前先跑一次 `login_parents.bat`（或 `python run.py --config config.parents.toml login`），
   把爸妈的 BOSS 账号登进 `browser_profile_parents/`。
 - 爸妈版配置里 `[qq].enabled = false`，所以**不会逐条推送**；bot 会在开始时回一条
-  「已启动」、结束时补一条今日统计。本人版的逐条推送不受影响。
+  「已启动」、结束时补一条今日统计 + 今天找到的岗位（工作岗位 / 工作时长 / 工作地点）。
+  本人版的逐条推送不受影响，通知里也会带这三项。
 - 两个版本共用一把浏览器锁和同一个 Edge 开关；切到哪个账号，就只保留哪个账号的 Edge。
 - `/停止` 停的是**当前正在跑的那个任务**（不管是本人版还是爸妈版）。
 

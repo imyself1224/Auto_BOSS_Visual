@@ -116,6 +116,7 @@ class GreetAgent:
         self.rules = filters.Rules(
             require_internship=bool(cfg.get("job_filter.require_internship", True)),
             exclude_internship=bool(cfg.get("job_filter.exclude_internship", False)),
+            exclude_night_shift=bool(cfg.get("job_filter.exclude_night_shift", False)),
             min_daily_wage=float(cfg.get("job_filter.min_daily_wage", 300)),
             min_monthly_wage=float(cfg.get("job_filter.min_monthly_wage", 0) or 0),
             education=edu,
@@ -153,6 +154,8 @@ class GreetAgent:
         self.kb_path = cfg.project_path(raw_kb) if raw_kb else None
         self.kb = (self.kb_path.read_text(encoding="utf-8").strip()
                    if self.kb_path is not None and self.kb_path.is_file() else "")
+        # 爸妈版等无简历账号的找工说明：拼进列表页提示词（年龄 / 优先岗位 / 不要夜班）
+        self.worker_context = str(cfg.get("prompt.worker_context", "") or "").strip()
 
         # QQ 遥控「停止」时 bot 会建这个文件，扫描/投递间隙看到就收工
         self.stop_flag = cfg.stop_flag
@@ -399,7 +402,11 @@ class GreetAgent:
                     self.log("  ! 重进后还在，这个来源先放弃")
                     return
 
-            data = self._look(prompts.list_user(self.kb, require_fit=self.require_fit), tag)
+            data = self._look(
+                prompts.list_user(self.kb, require_fit=self.require_fit,
+                                  context=self.worker_context),
+                tag,
+            )
             self._check_risk(data)
 
             state = data.get("page_state")
@@ -913,7 +920,7 @@ class GreetAgent:
         for key, label in (("不是实习", "不是实习"), ("是实习岗", "实习岗（无简历模式只投正式岗）"),
                            ("日薪中位", "日薪不够"), ("月薪最低", "月薪不够"),
                            ("日薪最低", "产品/测试薪资不够"), ("没有可投的档位", "方向不对口"),
-                           ("不是设置的", "学历不够"),
+                           ("不是设置的", "学历不够"), ("夜班", "夜班/倒班岗"),
                            ("地点", f"不在{city}"), ("无法解析", "薪资读不出")):
             if key in reason:
                 return label
@@ -943,6 +950,8 @@ class GreetAgent:
         title = (job.get("title") or "").strip()
         company = (job.get("company") or "").strip()
         salary = job.get("salary") or ""
+        location = str(job.get("location") or "").strip()
+        work_hours = str(job.get("work_hours") or "").strip()
         self._attempted.add(job_key(title, company))
         self.log(f"\n  ▸ {title}  @ {company}  {salary}")
 
@@ -950,7 +959,8 @@ class GreetAgent:
         # 那一下本身就会消耗配额并真实触达 HR，演练不该产生任何外部影响。
         if self.dry_run:
             self.stats["dry_run"] += 1
-            self.store.record(title, company, salary, "", "dry_run", "演练模式，未发送")
+            self.store.record(title, company, salary, "", "dry_run", "演练模式，未发送",
+                              location=location, work_hours=work_hours)
             return
 
         # 这个 agent 只做一件事：点「立即沟通」。平台会自动发出默认招呼语并附上在线简历，
@@ -960,7 +970,8 @@ class GreetAgent:
             if not self._click_greet(job):
                 self.stats["failed"] += 1
                 self.store.record(title, company, salary, "", "failed",
-                                  "未能确认「立即沟通」按钮（找不到，或按钮不属于该职位）")
+                                  "未能确认「立即沟通」按钮（找不到，或按钮不属于该职位）",
+                                  location=location, work_hours=work_hours)
                 self.log("    ✗ 没能确认沟通按钮，跳过这个职位")
                 return
 
@@ -968,17 +979,20 @@ class GreetAgent:
             self._back_to_list_if_left()
 
             self.stats["sent"] += 1
-            self.store.record(title, company, salary, "", "sent")
+            self.store.record(title, company, salary, "", "sent",
+                              location=location, work_hours=work_hours)
             total = self.store.greeted_today()
             self.log(f"    ✓ 已打招呼（今日累计 {total}/{self.cap}）")
             if self.notifier is not None:
-                self.notifier.job_sent(title, company, salary, total, self.cap)
+                self.notifier.job_sent(title, company, salary, total, self.cap,
+                                       location=location, work_hours=work_hours)
 
         except StopRun:
             raise
         except Exception as exc:  # noqa: BLE001
             self.stats["failed"] += 1
-            self.store.record(title, company, salary, "", "failed", str(exc)[:200])
+            self.store.record(title, company, salary, "", "failed", str(exc)[:200],
+                              location=location, work_hours=work_hours)
             self.log(f"    ✗ 失败：{exc}")
 
     @staticmethod

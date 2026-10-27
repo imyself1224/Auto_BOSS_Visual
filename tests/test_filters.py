@@ -317,6 +317,7 @@ def _parent_job(**kw) -> dict:
 PARENT_RULES = Rules(
     require_internship=False,
     exclude_internship=True,
+    exclude_night_shift=True,
     min_daily_wage=0,
     min_monthly_wage=5000,
     require_city="上海",
@@ -367,10 +368,26 @@ def test_parent_mode():
     check("require_internship 仍然只认实习", v.ok, False)
 
 
+def test_parent_night_shift():
+    v = evaluate(_parent_job(tags=["白班", "经验不限"]), PARENT_RULES)
+    check_true("白班放行", v.ok)
+
+    v = evaluate(_parent_job(tags=["夜班", "经验不限"]), PARENT_RULES)
+    check("标签写夜班被排除", v.ok, False)
+    check_true("拒绝理由写夜班", any("夜班" in r for r in v.reasons))
+
+    v = evaluate(_parent_job(work_hours="两班倒"), PARENT_RULES)
+    check("两班倒被排除", v.ok, False)
+
+    v = evaluate(_parent_job(title="普工（长白班）", work_hours="8小时/天"),
+                 PARENT_RULES)
+    check_true("长白班 + 8小时放行", v.ok)
+
+
 if __name__ == "__main__":
     for fn in (test_wage, test_internship, test_evaluate,
                test_job_education, test_education_filter, test_salary_unlimited,
-               test_parent_mode):
+               test_parent_mode, test_parent_night_shift):
         fn()
     total = PASSED + len(FAILED)
     print(f"通过 {PASSED}/{total}")

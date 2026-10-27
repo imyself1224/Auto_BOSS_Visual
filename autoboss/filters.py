@@ -24,6 +24,9 @@ _INTERN_MARKERS = ("实习", "实习生", "intern", "Intern", "INTERN", "暑期"
 # 实习卡片标签行特有的写法：到岗天数「4天/周」、实习时长「6个月」
 _INTERN_TAG_RE = re.compile(r"\d\s*天\s*/\s*周|\d+\s*个月")
 
+# 爸妈版用：明确不要夜班。两班倒 / 三班倒通常包含夜班，也一并排除。
+_NIGHT_SHIFT_MARKERS = ("夜班", "晚班", "夜勤", "两班倒", "三班倒", "倒班", "轮班")
+
 
 def _norm(text: str | None) -> str:
     return (text or "").translate(_FULLWIDTH).strip()
@@ -177,6 +180,8 @@ class Rules:
     require_internship: bool = True
     # 爸妈版用：明确排除实习岗（和 require_internship 互斥，两个都开时 require 优先）
     exclude_internship: bool = False
+    # 爸妈版用：不要夜班（标题 / 标签 / 工作时长里出现夜班、倒班等就跳过）
+    exclude_night_shift: bool = False
     min_daily_wage: float = 300.0
     # 月薪下限（元/月）。比较折算后月薪区间的**最低值**；
     # 和 min_daily_wage 可以只开一个，都开时两个都要满足。
@@ -247,6 +252,19 @@ def evaluate(job: dict, rules: Rules) -> Verdict:
     else:
         reasons.append("实习岗" if is_intern else "非实习岗")
 
+    # ---- 硬条件 1.5：夜班 / 倒班（爸妈版）----
+    if hard_fail is None and rules.exclude_night_shift:
+        shift_text = " ".join(str(part) for part in (
+            job.get("title") or "",
+            job.get("job_type") or "",
+            job.get("work_hours") or "",
+            " ".join(str(t) for t in (job.get("tags") or [])),
+        ))
+        hit = next((m for m in _NIGHT_SHIFT_MARKERS if m in shift_text), "")
+        if hit:
+            hard_fail = f"夜班/倒班岗（出现「{hit}」），设置不要夜班"
+        else:
+            reasons.append("非夜班")
     # ---- 硬条件 2：学历（兜底复核）----
     # 主筛是 BOSS 搜索地址的 degree 参数；这里拿卡片标签复核，读不出就放行。
     # 「学历不限」按最低档（rank 0）算，和 BOSS 的 URL 行为一致。

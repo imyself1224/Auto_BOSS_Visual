@@ -30,10 +30,13 @@ _DEFAULTS: dict[str, dict[str, object]] = {
     "search": {"query": "", "city": "100010000", "pages": 1},
     "source": {"mode": "recommend"},
     "resume": {"kb_path": "resume/kb.md", "required": True},
+    "prompt": {"worker_context": ""},
     "job_filter": {
         "require_internship": True,
         # 爸妈版用：不要实习岗（和 require_internship 是互斥语义，默认都不开）
         "exclude_internship": False,
+        # 爸妈版用：不要夜班 / 倒班
+        "exclude_night_shift": False,
         "min_daily_wage": 300.0,
         # 月薪下限（元/月）。和 min_daily_wage 可以只开一个；都开时两个都要满足。
         # 比较的是折算后月薪的**区间最低值**，避免「4-6K」这种下限不到 5000 的岗位混进来。
