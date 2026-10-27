@@ -105,7 +105,8 @@ python run.py --config config.parents.toml greet --auto
 
 第一次先把 `config.parents.toml` 的 `[search].queries` 改成爸妈实际能做的岗位；
 默认已经放了大龄工 / 大龄 / 工地 / 工厂 / 厂里 / 白班 / 长白班，再加上普工、仓管、保安、保洁等宽口径词。
-`[job_filter].exclude_night_shift = true` 会把标题/标签/工作时长里出现「夜班、晚班、两班倒、三班倒、倒班」的岗位直接跳过。
+`[job_filter].exclude_night_shift = true` 会把标题/标签/工作时长里出现「夜班、晚班、两班倒、三班倒、倒班」的岗位直接跳过；
+`max_worker_age = 55` 会拦掉明确写「50岁以下」这类年龄上限低于爸妈的岗位（没写年龄的仍然放行）。
 `[prompt].worker_context` 已写明爸爸 54 岁、妈妈 55 岁、优先岗位和不要夜班；
 读取卡片时会重点返回 **工作岗位（title）/ 工作时长（work_hours）/ 工作地点（location）**。
 
@@ -346,6 +347,7 @@ QQ 上设的条件存在项目根目录的 `.qq_prefs.json`（已在 `.gitignore
 | `require_internship` | `true` | 只要实习岗（看标题和标签，校招全职不算） |
 | `exclude_internship` | `false` | 爸妈版用：排除实习岗（标题 / 标签 / 类型任一处出现实习就跳过） |
 | `exclude_night_shift` | `false` | 爸妈版用：排除夜班 / 倒班岗（标题 / 标签 / `work_hours` 里出现夜班、晚班、两班倒、三班倒、倒班就跳过） |
+| `max_worker_age` | `0` | 爸妈版用：明确写了年龄上限且低于这个岁数就跳过（如设 `55`，`50岁以下` 会被拦；没写年龄的放行） |
 | `min_daily_wage` | `300` | 日薪下限，**区间取中位数**；`0` = 不限。BOSS 没有日薪档，由程序按卡片薪资精确比较 |
 | `min_monthly_wage` | `0` | 月薪下限，**按折算后月薪区间的最低值**比较；`0` = 不限。和日薪下限可只开一个 |
 | `education` | `"不限"` | 岗位学历档位（不限 / 大专 / 本科 / 硕士 / 博士），拼成 URL 的 `degree` 参数（如硕士 = `204`）。设了具体档位后 BOSS 会排除「学历不限」的岗位 |

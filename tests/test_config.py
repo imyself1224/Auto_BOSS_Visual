@@ -64,6 +64,7 @@ def test_parents_profile():
     for word in ("大龄工", "工地", "工厂", "白班", "长白班"):
         check_true(f"关键词包含 {word}", word in queries)
     check("不要夜班", cfg.get("job_filter.exclude_night_shift"), True)
+    check("年龄上限 55", cfg.get("job_filter.max_worker_age"), 55)
     context = str(cfg.get("prompt.worker_context") or "")
     check_true("prompt 写爸爸 54 岁", "54" in context)
     check_true("prompt 写妈妈 55 岁", "55" in context)
@@ -92,6 +93,7 @@ def test_no_resume_prompt():
     ctx = prompts.list_user("", require_fit=False, context="爸爸 54 岁，妈妈 55 岁")
     check_true("找工上下文拼进提示词", "54 岁" in ctx and "55 岁" in ctx)
     check_true("提示词要求读取 work_hours", "work_hours" in ctx)
+    check_true("提示词要求读取 age_requirement", "age_requirement" in ctx)
     check_true("无简历提示词也要求工作地点", "location" in no_fit)
 
 

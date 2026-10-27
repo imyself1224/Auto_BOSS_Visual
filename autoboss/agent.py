@@ -117,6 +117,7 @@ class GreetAgent:
             require_internship=bool(cfg.get("job_filter.require_internship", True)),
             exclude_internship=bool(cfg.get("job_filter.exclude_internship", False)),
             exclude_night_shift=bool(cfg.get("job_filter.exclude_night_shift", False)),
+            max_worker_age=int(cfg.get("job_filter.max_worker_age", 0) or 0),
             min_daily_wage=float(cfg.get("job_filter.min_daily_wage", 300)),
             min_monthly_wage=float(cfg.get("job_filter.min_monthly_wage", 0) or 0),
             education=edu,
@@ -921,6 +922,7 @@ class GreetAgent:
                            ("日薪中位", "日薪不够"), ("月薪最低", "月薪不够"),
                            ("日薪最低", "产品/测试薪资不够"), ("没有可投的档位", "方向不对口"),
                            ("不是设置的", "学历不够"), ("夜班", "夜班/倒班岗"),
+                           ("年龄上限", "年龄超限"),
                            ("地点", f"不在{city}"), ("无法解析", "薪资读不出")):
             if key in reason:
                 return label

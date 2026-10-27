@@ -92,6 +92,8 @@ require_internship = false
 exclude_internship = true
 # 不要夜班：标题/标签/工作时长里出现 夜班、晚班、两班倒、三班倒、倒班 就跳过。
 exclude_night_shift = true
+# 爸爸 54 岁、妈妈 55 岁：岗位明确写年龄上限、且低于 55 岁就跳过（没写年龄的放行）。
+max_worker_age = 55
 
 # 月薪 5000 以上。按区间最低值算：4-6K 会被拦，5-8K 会放行。
 # 日薪下限必须关掉，否则 300 元/天 ≈ 6525 元/月会盖过这里的 5000。

@@ -37,6 +37,8 @@ _DEFAULTS: dict[str, dict[str, object]] = {
         "exclude_internship": False,
         # 爸妈版用：不要夜班 / 倒班
         "exclude_night_shift": False,
+        # 爸妈版用：明确写了年龄上限、且低于这个岁数就跳过（0 = 不按年龄筛）
+        "max_worker_age": 0,
         "min_daily_wage": 300.0,
         # 月薪下限（元/月）。和 min_daily_wage 可以只开一个；都开时两个都要满足。
         # 比较的是折算后月薪的**区间最低值**，避免「4-6K」这种下限不到 5000 的岗位混进来。

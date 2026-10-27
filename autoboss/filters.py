@@ -150,6 +150,32 @@ _EDU_WORDS_RE = re.compile(
 _WORK_HOURS_RE = re.compile(
     r"\d+\s*小时(?:\s*/\s*天)?|长白班|白班|夜班|晚班|两班倒|三班倒|倒班|轮班|"
     r"月休\s*\d+\s*天|\d+\s*天\s*/\s*周")
+_AGE_RANGE_RE = re.compile(r"(\d{2})\s*[-~—至到]\s*(\d{2})\s*周?岁")
+_AGE_MAX_RE = re.compile(r"(\d{2})\s*周?岁\s*(?:以下|以内|及以下)|"
+                         r"(?:年龄|不超过|低于|最大)\s*(\d{2})\s*周?岁")
+
+
+def job_age_requirement(job: dict) -> str:
+    """年龄要求原文：优先用模型给的 age_requirement，缺失时从标签/标题/时长里找。"""
+    raw = str(job.get("age_requirement") or "").strip()
+    if raw:
+        return raw
+    parts = [str(t) for t in (job.get("tags") or [])]
+    parts.append(str(job.get("title") or ""))
+    parts.append(str(job.get("work_hours") or ""))
+    return " ".join(p for p in parts if p)
+
+
+def max_age_requirement(text: str) -> int | None:
+    """从「18-45岁 / 50岁以下」里取出年龄上限；读不出返回 None。"""
+    s = str(text or "")
+    m = _AGE_RANGE_RE.search(s)
+    if m:
+        return int(m.group(2))
+    m = _AGE_MAX_RE.search(s)
+    if m:
+        return int(m.group(1) or m.group(2))
+    return None
 
 
 def job_work_hours(job: dict) -> str:
@@ -201,6 +227,8 @@ class Rules:
     exclude_internship: bool = False
     # 爸妈版用：不要夜班（标题 / 标签 / 工作时长里出现夜班、倒班等就跳过）
     exclude_night_shift: bool = False
+    # 爸妈版用：明确写了年龄上限、且低于这个岁数就跳过（0 = 不按年龄筛）
+    max_worker_age: int = 0
     min_daily_wage: float = 300.0
     # 月薪下限（元/月）。比较折算后月薪区间的**最低值**；
     # 和 min_daily_wage 可以只开一个，都开时两个都要满足。
@@ -284,6 +312,16 @@ def evaluate(job: dict, rules: Rules) -> Verdict:
             hard_fail = f"夜班/倒班岗（出现「{hit}」），设置不要夜班"
         else:
             reasons.append("非夜班")
+
+    # ---- 硬条件 1.6：年龄上限（爸妈版）----
+    if hard_fail is None and rules.max_worker_age > 0:
+        age_text = job_age_requirement(job)
+        age_max = max_age_requirement(age_text)
+        if age_max is not None and age_max < rules.max_worker_age:
+            hard_fail = (f"年龄上限 {age_max} 岁，低于设置的 "
+                         f"{rules.max_worker_age} 岁（{age_text}）")
+        else:
+            reasons.append("年龄不超限" if age_max is not None else "年龄未标注")
     # ---- 硬条件 2：学历（兜底复核）----
     # 主筛是 BOSS 搜索地址的 degree 参数；这里拿卡片标签复核，读不出就放行。
     # 「学历不限」按最低档（rank 0）算，和 BOSS 的 URL 行为一致。

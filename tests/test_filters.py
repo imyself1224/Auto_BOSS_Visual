@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from autoboss.filters import (  # noqa: E402
     Rules, evaluate, job_education, job_work_hours, looks_like_internship,
-    parse_daily_wage,
+    max_age_requirement, parse_daily_wage,
 )
 
 PASSED = 0
@@ -319,6 +319,7 @@ PARENT_RULES = Rules(
     require_internship=False,
     exclude_internship=True,
     exclude_night_shift=True,
+    max_worker_age=55,
     min_daily_wage=0,
     min_monthly_wage=5000,
     require_city="上海",
@@ -391,6 +392,24 @@ def test_parent_night_shift():
     check("从标题补班次", job_work_hours({"title": "普工（长白班）"}),
           "长白班")
     check("都没有就是空", job_work_hours({"title": "普工"}), "")
+
+    v = evaluate(_parent_job(age_requirement="18-45岁"), PARENT_RULES)
+    check("年龄上限 45 被排除", v.ok, False)
+    check_true("拒绝理由写年龄", any("年龄上限" in r for r in v.reasons))
+
+    v = evaluate(_parent_job(age_requirement="50岁以下"), PARENT_RULES)
+    check("50岁以下被排除", v.ok, False)
+
+    v = evaluate(_parent_job(age_requirement="18-55岁"), PARENT_RULES)
+    check_true("18-55岁放行", v.ok)
+
+    v = evaluate(_parent_job(age_requirement="年龄不限"), PARENT_RULES)
+    check_true("年龄不限放行", v.ok)
+
+    check("解析区间年龄上限", max_age_requirement("18-45岁"), 45)
+    check("解析以下年龄上限", max_age_requirement("50岁以下"), 50)
+    check("解析周岁年龄上限", max_age_requirement("45周岁以内"), 45)
+    check("无年龄返回 None", max_age_requirement("经验不限"), None)
 
 
 if __name__ == "__main__":
