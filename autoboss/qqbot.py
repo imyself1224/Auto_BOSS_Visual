@@ -17,6 +17,7 @@ daily_greet.bat）：这时「投递」会被拒绝，「状态」能看到它�
 from __future__ import annotations
 
 import base64
+import json
 import os
 import sqlite3
 import subprocess
@@ -24,6 +25,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -32,41 +34,27 @@ from websockets.exceptions import ConnectionClosed
 from . import config as cfgmod
 from . import keywords as kw
 from . import preferences
+from .browser import CDPConnection, BrowserSession, port_open
 from .lock import BrowserLock
 from .qq import Notifier, OneBot
 from .qqlaunch import QQLauncher
 
 HELP = """🤖 auto_boss 投递指令
 
+/切换              在本人版 / 爸妈版之间切换（关掉当前 Edge，打开另一个）
 /投递（条数）       实发，不写条数就投到平台额度用完
 /演练（条数）       只筛选不发送（默认 5 条）
 /学历（档位/不限）   岗位学历要求，如 /学历 硕士、/学历 不限
 /薪资（日薪/不限）   日薪下限，如 /薪资 300；也认 月薪8000 / 8k
 /关键词（词.../清空） 检索关键词，如 /关键词 大模型算法 Agent
 /配置（清空）       查看当前配置；清空 = 恢复最开始的状态
-/切换 投递（条数）   用爸妈版配置实发（上海 / 无简历 / 月薪 ≥5000）
-/切换 演练（条数）   用爸妈版配置只筛选不发送
-/切换 状态 / 配置 / 停止 / 今日 / 统计 / 日志
 /停止              让正在跑的任务收尾退出
 
-也可以直接发「/投递 切换 10」。
-完整指令表见下图（爸妈版发「/切换 帮助」）。"""
-
-PARENTS_HELP = """👨‍👩‍👧 爸妈版指令（/切换）
-
-/切换 投递（条数）   实发，不写条数就投到平台额度用完
-/切换 演练（条数）   只筛选不发送（默认 5 条）
-/切换 状态          看当前任务 / 今日进度
-/切换 配置          看爸妈版条件（上海 / 无简历 / 月薪 ≥5000）
-/切换 停止          让正在跑的任务收尾退出
-/切换 今日 / 统计 / 日志
-
-也可以直接发「/投递 切换 10」。"""
+完整指令表见下图（其余指令都在图里）。"""
 
 DEFAULT_PROFILE = "self"
-# 爸妈版的指令别名。normalize 后统一成 "parents"。
-# 主指令是「切换」；旧的「爸妈 / 父母 / parents」继续兼容。
-PARENT_ALIASES = ("切换", "爸妈", "父母", "parents", "parent")
+# 爸妈版的配置别名（--config app.name=parents）；/切换 只切档位，不再做指令前缀。
+PARENT_ALIASES = ("爸妈", "父母", "parents", "parent")
 PARENTS_CONFIG = "config.parents.toml"
 
 def cq_unescape(text: str) -> str:
@@ -91,6 +79,9 @@ class QQBot:
         self.cfg = cfg
         self.run_py = run_py
         self.root = run_py.parent
+        # 当前活跃账号档位：/切换 在 self / parents 之间来回切，并持久化。
+        self.active_path = self.root / ".qq_active_profile"
+        self.active_profile = self._load_active_profile()
         self.notifier = Notifier(cfg)
         self.owner = self.notifier.owner
         self.bot: OneBot | None = None
@@ -144,6 +135,129 @@ class QQBot:
 
     def profile_label(self, profile=DEFAULT_PROFILE) -> str:
         return "爸妈版" if self._profile_key(profile) == "parents" else "本人版"
+
+    # ------------------------------------------------------------------
+    #  /切换：在两个账号档位之间切换（同时只保留一个 Edge）
+    # ------------------------------------------------------------------
+    def _load_active_profile(self) -> str:
+        try:
+            key = self.active_path.read_text(encoding="utf-8").strip().lower()
+        except OSError:
+            return DEFAULT_PROFILE
+        return "parents" if key in ("parents", "爸妈", "父母") else DEFAULT_PROFILE
+
+    def _save_active_profile(self) -> None:
+        try:
+            self.active_path.write_text(self.active_profile + "\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"  [switch] 活跃档位写入失败：{exc}")
+
+    def active_cfg(self):
+        """当前活跃档位的配置。"""
+        return self.profile_cfg(self.active_profile)
+
+    @staticmethod
+    def _kill_port_owner(port: int) -> bool:
+        """CDP 关不掉时，按监听端口找到 Edge 进程强杀。"""
+        try:
+            out = subprocess.run(["netstat", "-ano", "-p", "tcp"],
+                                 capture_output=True, text=True, errors="ignore").stdout
+        except OSError:
+            return False
+        for line in out.splitlines():
+            parts = line.split()
+            if (len(parts) >= 5 and parts[0].upper() == "TCP"
+                    and parts[1].endswith(f":{port}")
+                    and parts[3].upper() == "LISTENING"):
+                subprocess.run(["taskkill", "/F", "/T", "/PID", parts[4]],
+                               capture_output=True, text=True, errors="ignore")
+                return True
+        return False
+
+    def _close_browser(self, cfg) -> bool:
+        """关掉某个档位的 Edge；没开也算成功。"""
+        port = int(cfg.get("browser.cdp_port", 9222) or 9222)
+        if not port_open(port):
+            return True
+        ws = None
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/json/version", timeout=3) as resp:
+                ws = json.loads(resp.read().decode("utf-8")).get("webSocketDebuggerUrl")
+        except (OSError, ValueError, TypeError):
+            ws = None
+        if ws:
+            try:
+                conn = CDPConnection(ws, timeout=5)
+                try:
+                    conn.send("Browser.close", timeout=5)
+                except Exception:  # noqa: BLE001 —— 关闭时连接可能直接断开
+                    pass
+                finally:
+                    conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        deadline = time.time() + 6
+        while time.time() < deadline:
+            if not port_open(port):
+                return True
+            time.sleep(0.25)
+        # CDP 不认 Browser.close 时兜底强杀
+        if self._kill_port_owner(port):
+            time.sleep(1.0)
+        return not port_open(port)
+
+    def _launch_browser(self, cfg) -> tuple[bool, str]:
+        """打开某个档位的 Edge；已经开着就直接复用。"""
+        port = int(cfg.get("browser.cdp_port", 9222) or 9222)
+        if port_open(port):
+            return True, ""
+        try:
+            BrowserSession(cfg).launch()
+        except (Exception, SystemExit) as exc:  # noqa: BLE001
+            return False, str(exc) or type(exc).__name__
+        return port_open(port), ""
+
+    def switch_cmd(self, rest: list[str]) -> str:
+        """「/切换」：在本人版 / 爸妈版之间切换，只保留一个 Edge。"""
+        if rest:
+            return ("❌ 「/切换」不带参数；直接发 /切换 就会在本人版和爸妈版之间切换。")
+        if self._running():
+            return (f"已经有任务在跑：{self.task_desc}\n"
+                    "先发「/停止」，等它收尾后再 /切换。")
+        if self._external_running():
+            return ("已经有一个任务在使用浏览器（不是从 QQ 启动的）。\n"
+                    "先发「/停止」，等它收尾后再 /切换。")
+
+        target = "parents" if self.active_profile == DEFAULT_PROFILE else DEFAULT_PROFILE
+        try:
+            new_cfg = self.profile_cfg(target)
+        except RuntimeError as exc:
+            return f"❌ {exc}"
+        try:
+            old_cfg = self.active_cfg()
+        except RuntimeError:
+            old_cfg = self.cfg
+        old_label = self.profile_label(self.active_profile)
+        new_label = self.profile_label(target)
+
+        old_closed = self._close_browser(old_cfg)
+        self.active_profile = target
+        self._save_active_profile()
+        launched, error = self._launch_browser(new_cfg)
+
+        lines = [f"🔄 已从{old_label}切换到{new_label}"]
+        lines.append(f"Edge：{new_cfg.user_data_dir.name}"
+                     f"（端口 {new_cfg.get('browser.cdp_port')}）")
+        if not old_closed:
+            lines.append(f"⚠️ {old_label}的 Edge 没关掉，可能还开着；"
+                         "需要的话手动关一下。")
+        if not launched:
+            lines.append(f"⚠️ {new_label}的 Edge 没启动：{error or '端口未响应'}；"
+                         "下次 /投递 会自动再试。")
+        lines.append("现在 /投递、/演练、/配置、/状态 等都对"
+                     f"「{new_label}」生效；同一时间只保留一个 Edge。")
+        return "\n".join(lines)
 
     @staticmethod
     def _touch_stop(cfg):
@@ -298,9 +412,12 @@ class QQBot:
 
         if cmd in ("帮助", "help", "菜单", "?", "？"):
             return HELP
-        # /切换 ...：走 config.parents.toml，和本人版完全隔离
+        # /切换：在两个账号档位之间切换，后面的指令都作用于当前档位
+        if cmd in ("切换", "switch"):
+            return self.switch_cmd(rest)
         if cmd in PARENT_ALIASES:
-            return self.parents_cmd(rest)
+            return ("爸妈版已经改成用「/切换」切账号了：先发 /切换，"
+                    "再发 /投递、/配置、/状态 等。")
         if cmd in ("投递", "开始", "start"):
             return self.task_cmd(rest, live=True)
         if cmd in ("演练", "dry"):
@@ -335,40 +452,10 @@ class QQBot:
         return f"不认识的指令「{parts[0]}」，发「/帮助」查看可用指令"
 
     # ------------------------------------------------------------------
-    #  爸妈版指令
+    #  爸妈版配置展示
     # ------------------------------------------------------------------
-    def parents_cmd(self, rest: list[str]) -> str:
-        """「/切换 ...」：用独立配置/Edge profile 跑爸妈版。"""
-        rest = list(rest)
-        if not rest:
-            return PARENTS_HELP
-        sub = rest[0].lower()
-        if sub in ("帮助", "help", "菜单", "?", "？"):
-            return PARENTS_HELP
-        if sub.isdigit():
-            # /切换 10 = 实发 10 条
-            return self.task_cmd(rest, live=True, profile="parents")
-        if sub in ("投递", "开始", "start"):
-            return self.task_cmd(rest[1:], live=True, profile="parents")
-        if sub in ("演练", "dry"):
-            return self.task_cmd(rest[1:], live=False, profile="parents")
-        if sub in ("状态", "status"):
-            return self.status("parents")
-        if sub in ("配置", "设置", "config", "cfg"):
-            return self.parents_config_text()
-        if sub in ("停止", "stop"):
-            return self.stop()
-        if sub in ("今日", "今天", "记录", "today"):
-            return self.today("parents")
-        if sub in ("统计", "stats"):
-            return self.stats("parents")
-        if sub in ("日志", "log"):
-            n = self._int(rest[1], 15) if len(rest) > 1 else 15
-            return self.log_tail(min(n or 15, MAX_LINES), profile="parents")
-        return f"不认识的切换指令「{rest[0]}」。\n\n{PARENTS_HELP}"
-
     def parents_config_text(self) -> str:
-        """「/切换 配置」：只列爸妈版真正生效的条件，避免和本人版看串。"""
+        """当前活跃档位是爸妈版时，`/配置` 显示的条件。"""
         try:
             cfg = self.profile_cfg("parents")
         except RuntimeError as exc:
@@ -383,7 +470,7 @@ class QQBot:
             wages.append(f"月薪最低 ≥{monthly:g}")
         queries = kw.queries_of(kw.planned_sources(cfg))
         lines = [
-            "👨‍👩‍👧 当前爸妈版配置",
+            "👨‍👩‍👧 当前配置（爸妈版）",
             f"城市：{cfg.get('job_filter.require_city') or '不限'}",
             f"薪资：{' · '.join(wages) or '不限'}",
             f"学历：{education}",
@@ -397,7 +484,8 @@ class QQBot:
         if queries:
             lines.append(kw.block(queries))
         lines.append("")
-        lines.append("直接发「/切换 投递」（实发）或「/切换 演练」（只筛不发）。")
+        lines.append("直接发「/投递」（实发）或「/演练」（只筛不发）；"
+                     "发「/切换」回到另一个账号。")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -457,10 +545,13 @@ class QQBot:
                 "设定存在 .qq_prefs.json，删掉它就全部回到 config.toml。")
 
     def education_cmd(self, rest: list[str]) -> str:
-        """「/学历 [档位]」：不带参数 = 查看，带了 = 设定一个档位。"""
-        prefs = self._prefs()
+        """「/学历 [档位]」：不带参数 = 查看，带了 = 设定一个档位（作用于当前档位）。"""
+        cfg = self.active_cfg()
+        label = self.profile_label(self.active_profile)
+        prefs = self._prefs(cfg)
         if not rest:
-            return (preferences.describe(prefs) + "\n\n" + self.prefs_help())
+            return (f"🎓 {label}\n" + preferences.describe(prefs)
+                    + "\n\n" + self.prefs_help())
         if len(rest) > 1:
             return ("❌ 一次只写一个学历档位，例如 /学历 硕士；"
                     "不限制写 /学历 不限。\n" + self.prefs_help())
@@ -468,44 +559,42 @@ class QQBot:
         if value is None:
             return f"❌ {error}\n{self.prefs_help()}"
         prefs = prefs.with_education(value)
-        self._save_prefs(prefs)
+        self._save_prefs(prefs, cfg)
         degree = preferences.degree_param(value)
         url_line = (f"\nBOSS URL 参数：degree={degree}" if degree
                     else "\n（不带 degree 参数，不按学历筛）")
-        return (f"✅ 已设定学历：{value or '不限'}{url_line}\n\n"
+        return (f"✅ 已设定{label}学历：{value or '不限'}{url_line}\n\n"
                 + preferences.describe(prefs))
 
     def wage_cmd(self, raw: str) -> str:
-        """「/薪资 [日薪]」：不带参数 = 查看，带了 = 设定。"""
-        prefs = self._prefs()
+        """「/薪资 [日薪]」：不带参数 = 查看，带了 = 设定（作用于当前档位）。"""
+        cfg = self.active_cfg()
+        label = self.profile_label(self.active_profile)
+        prefs = self._prefs(cfg)
         text = raw.strip()
         if not text:
-            return (preferences.describe(prefs) + "\n\n" + self.prefs_help())
+            return (f"💰 {label}\n" + preferences.describe(prefs)
+                    + "\n\n" + self.prefs_help())
         if preferences.is_clear(text):
             prefs = prefs.with_wage(0.0)
-            self._save_prefs(prefs)
-            return "✅ 已取消日薪限制\n\n" + preferences.describe(prefs)
+            self._save_prefs(prefs, cfg)
+            return f"✅ 已取消{label}日薪限制\n\n" + preferences.describe(prefs)
         wage = preferences.parse_wage(text)
         problem = preferences.wage_problem(wage)
         if problem:
             return f"❌ {problem}\n{self.prefs_help()}"
         prefs = prefs.with_wage(wage)
-        self._save_prefs(prefs)
-        return (f"✅ 已设定日薪下限：≥{wage:g} 元/天（区间取中位）\n\n"
+        self._save_prefs(prefs, cfg)
+        return (f"✅ 已设定{label}日薪下限：≥{wage:g} 元/天（区间取中位）\n\n"
                 + preferences.describe(prefs))
 
-    def task_cmd(self, rest: list[str], live: bool,
-                 profile: str = DEFAULT_PROFILE) -> str:
-        """「/投递 [条数]」「/演练 [条数]」—— 只接受条数。
+    def task_cmd(self, rest: list[str], live: bool) -> str:
+        """「/投递 [条数]」「/演练 [条数]」—— 只接受条数，作用于当前 /切换 到的账号。
 
         关键词、学历、薪资都是单独的指令（/关键词、/学历、/薪资）设定的，
         这样 /投递 的语义永远只有「发多少条」一件事。
-        `/投递 切换 10` 和 `/切换 投递 10` 等价。
         """
         rest = list(rest)
-        if rest and rest[0].lower() in PARENT_ALIASES:
-            profile = "parents"
-            rest = rest[1:]
         limit = None
         if rest:
             if len(rest) > 1 or not rest[0].isdigit():
@@ -520,38 +609,44 @@ class QQBot:
         if not live and limit is None:
             limit = 5                 # 「/演练」默认 5 条
         try:
-            return self.start(live=live, limit=limit, profile=profile)
+            return self.start(live=live, limit=limit)
         except RuntimeError as exc:
             return f"❌ {exc}"
 
     def config_cmd(self, rest: list[str] | None = None) -> str:
-        """「/配置」查看；「/配置 清空」恢复最开始的状态。"""
+        """「/配置」查看；「/配置 清空」恢复当前账号的最初状态。"""
         rest = list(rest or [])
         if rest:
             if len(rest) == 1 and preferences.is_clear(rest[0]):
                 return self.reset_cmd()
             return ("❌ 「/配置」只支持不带参数（查看）或「/配置 清空」"
                     "（恢复最开始的状态）")
+        if self.active_profile == "parents":
+            return self.parents_config_text()
         return self._config_text()
 
     def reset_cmd(self) -> str:
-        """清掉 QQ 上设的关键词 / 学历 / 薪资，全部回到 config.toml。"""
-        self.keywords_path.unlink(missing_ok=True)
-        self.prefs_path.unlink(missing_ok=True)
-        return ("✅ 已恢复最开始的状态：关键词、学历、薪资都回到 config.toml。\n\n"
-                + self._config_text())
+        """清掉当前账号 QQ 上设的关键词 / 学历 / 薪资，回到它的 config。"""
+        cfg = self.active_cfg()
+        cfg.qq_keywords_path.unlink(missing_ok=True)
+        cfg.qq_prefs_path.unlink(missing_ok=True)
+        label = self.profile_label(self.active_profile)
+        text = (self.parents_config_text() if self.active_profile == "parents"
+                else self._config_text())
+        return f"✅ 已恢复「{label}」最开始的状态：关键词、学历、薪资都回到配置。\n\n" + text
 
     def _config_text(self) -> str:
         """当前真正生效的全部要求，一眼看全。"""
-        cfg = self.cfg
+        active = self.active_cfg()
+        cfg = active
         try:
             # bot 可能已经常驻好几天，配置文件改完要能立即反映出来；
-            # 用启动时那份配置的路径，--config 指定的账号不会串到默认配置。
-            cfg = cfgmod.load(self.cfg.path)
+            # 用当前账号那份配置的路径，--config 指定的账号不会串到默认配置。
+            cfg = cfgmod.load(active.path)
         except (Exception, SystemExit):  # noqa: BLE001
             pass
-        prefs = self._prefs()
-        lines = ["🔧 当前投递配置"]
+        prefs = self._prefs(active)
+        lines = [f"🔧 当前投递配置（{self.profile_label(self.active_profile)}）"]
 
         if prefs.education is None:
             education = preferences.education_from_config(cfg)
@@ -573,7 +668,7 @@ class QQBot:
         wage_text = f"≥{wage:g} 元/天（区间取中位）" if wage > 0 else "不限"
         lines.append(f"💰 日薪下限：{wage_text}（{wage_src}）")
 
-        pending = self.pending_keywords()
+        pending = self.pending_keywords(active)
         plan = kw.planned_sources(cfg, pending)
         picked = kw.queries_of(plan)
         extra = [kw.label(kind, q) for kind, q in plan if kind != "search"]
@@ -633,34 +728,39 @@ class QQBot:
 
     def keyword_cmd(self, raw: str) -> str:
         """「/关键词 [关键词...]」：不带参数 = 查看，带了 = 设定，清空 = 恢复 config。"""
+        cfg = self.active_cfg()
+        label = self.profile_label(self.active_profile)
         words = kw.split_keywords(raw)
         if not words:
             return self.plan_text()
         if words[0].lower() in self._CLEAR_WORDS:
-            self._set_pending([])
-            return ("✅ 已清空 QQ 指定的关键词，之后的任务用 config.toml 的 "
-                    "[search].queries\n\n" + self.plan_text())
-        self._set_pending(words)
-        return (f"✅ 已设定 {len(words)} 个检索关键词，下次「/投递」「/演练」生效：\n"
+            self._set_pending([], cfg)
+            return (f"✅ 已清空{label} QQ 指定的关键词，之后的任务用 "
+                    "config 的 [search].queries\n\n" + self.plan_text())
+        self._set_pending(words, cfg)
+        return (f"✅ 已设定{label} {len(words)} 个检索关键词，"
+                "下次「/投递」「/演练」生效：\n"
                 + kw.block(words)
-                + "\n发「/关键词」查看，「/关键词 清空」恢复 config.toml")
+                + "\n发「/关键词」查看，「/关键词 清空」恢复配置")
 
     def plan_text(self) -> str:
         """当前会搜哪些关键词 —— 「/关键词」的回复，也是任务开始推送的同一份编排。"""
-        pending = self.pending_keywords()
-        cfg = self.cfg
+        active = self.active_cfg()
+        pending = self.pending_keywords(active)
+        label = self.profile_label(self.active_profile)
+        cfg = active
         try:
             # bot 可能已经常驻好几天，配置文件改完要能立即反映出来；
             # 读坏了（正在编辑、文件暂时不在）就退回启动时那份。
-            cfg = cfgmod.load(self.cfg.path)
+            cfg = cfgmod.load(active.path)
         except (Exception, SystemExit):  # noqa: BLE001
             pass
         plan = kw.planned_sources(cfg, pending)
         picked = kw.queries_of(plan)
         extra = [kw.label(kind, q) for kind, q in plan if kind != "search"]
 
-        head = ("🔎 当前检索关键词（QQ 指定，发「/关键词 清空」恢复 config.toml）"
-                if pending else "🔎 当前检索关键词（来自 config.toml）")
+        head = (f"🔎 {label}检索关键词（QQ 指定，发「/关键词 清空」恢复配置）"
+                if pending else f"🔎 {label}检索关键词（来自配置）")
         lines = [head]
         if picked:
             lines.append(f"共 {len(picked)} 个，按优先级：")
@@ -669,7 +769,7 @@ class QQBot:
             lines.append("没有配置关键词，只走推荐流")
         if extra:
             lines.append("另外还会走：" + " → ".join(extra))
-        lines.append(preferences.status_line(self._prefs()))
+        lines.append(preferences.status_line(self._prefs(active)))
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -685,14 +785,22 @@ class QQBot:
 
     def start(self, live: bool, limit: int | None, keywords: list[str] | None = None,
               prefs: preferences.Prefs | None = None,
-              profile: str = DEFAULT_PROFILE) -> str:
-        key = self._profile_key(profile)
+              profile: str | None = None) -> str:
+        key = self._profile_key(profile or self.active_profile)
         label = self.profile_label(key)
         if self._running():
             return f"已经有任务在跑：{self.task_desc}\n要换任务先发「/停止」"
         if self._external_running():
             return ("已经有一个任务在使用浏览器（不是从 QQ 启动的，比如 daily_greet.bat）。\n"
                     "这次不启动，免得两个任务抢同一个浏览器。要换任务先发「/停止」")
+
+        # 两个账号各有一个 Edge profile，但同时只保留一个 Edge：
+        # 启动当前档位前，先把另一个档位的浏览器关掉。
+        other = "parents" if key == DEFAULT_PROFILE else DEFAULT_PROFILE
+        try:
+            self._close_browser(self.profile_cfg(other))
+        except RuntimeError:
+            pass
 
         task_cfg = self.profile_cfg(key)
         # 这次只搜哪些词：指令里带的 > 这个账号「/关键词」设定的 > 配置文件的
@@ -847,8 +955,8 @@ class QQBot:
                            "AND substr(greeted_at,1,10)=?", (self._today(),), cfg=cfg)
         return int(rows[0][0]) if rows else 0
 
-    def status(self, profile: str = DEFAULT_PROFILE) -> str:
-        key = self._profile_key(profile)
+    def status(self, profile: str | None = None) -> str:
+        key = self._profile_key(profile or self.active_profile)
         cfg = self.profile_cfg(key)
         label = self.profile_label(key)
         running = self._running()
@@ -883,9 +991,9 @@ class QQBot:
         state = "收尾中" if stopping else "运行中"
         return f"🏃 {state}：{desc}\n已运行 {mins:.0f} 分钟（pid {pid}）\n{label}\n{head}"
 
-    def today(self, profile: str = DEFAULT_PROFILE) -> str:
-        cfg = self.profile_cfg(profile)
-        label = self.profile_label(profile)
+    def today(self, profile: str | None = None) -> str:
+        cfg = self.profile_cfg(profile or self.active_profile)
+        label = self.profile_label(profile or self.active_profile)
         rows = self._query(
             "SELECT title, company, salary, greeted_at FROM greeted "
             "WHERE status='sent' AND substr(greeted_at,1,10)=? ORDER BY greeted_at",
@@ -902,9 +1010,9 @@ class QQBot:
             lines.insert(1, f"（只列最近 {MAX_LINES} 条）")
         return "\n".join(lines)
 
-    def stats(self, profile: str = DEFAULT_PROFILE) -> str:
-        cfg = self.profile_cfg(profile)
-        label = self.profile_label(profile)
+    def stats(self, profile: str | None = None) -> str:
+        cfg = self.profile_cfg(profile or self.active_profile)
+        label = self.profile_label(profile or self.active_profile)
         names = {"sent": "已发送", "dry_run": "演练", "failed": "失败",
                  "filtered": "被过滤", "already": "已沟通过"}
         lines = [f"📊 {label}今日" if label != "本人版" else "📊 今日"]
@@ -920,11 +1028,11 @@ class QQBot:
                          f" {(stopped or '进行中/未收尾')[:30]}")
         return "\n".join(lines)
 
-    def log_tail(self, n: int, profile: str = DEFAULT_PROFILE) -> str:
-        cfg = self.profile_cfg(profile)
+    def log_tail(self, n: int, profile: str | None = None) -> str:
+        cfg = self.profile_cfg(profile or self.active_profile)
         logs = sorted(cfg.logs_dir.glob("greet_*.log"))
         if not logs:
-            return f"{self.profile_label(profile)}还没有运行日志"
+            return f"{self.profile_label(profile or self.active_profile)}还没有运行日志"
         latest = logs[-1]
         text = latest.read_text(encoding="utf-8", errors="replace")
         lines = [ln.rstrip() for ln in text.splitlines()

@@ -24,6 +24,8 @@ resume/*
 # QQ 上「/学历 ...」「/薪资 ...」设定的筛选条件
 .qq_prefs.json
 .qq_prefs.json.tmp
+# 当前 /切换 到的账号档位（self / parents）
+.qq_active_profile
 
 # SnowLuma（QQ 托管）：第三方程序 + 它的配置/登录数据，不上传
 SnowLuma/

@@ -103,7 +103,7 @@ prefer_district_bonus = 1.0
 # ============================================================
 [browser]
 executable_path = ""
-# 不能和本人版的 9222 冲突；两个 Edge 可以同时开着，但程序用全局锁保证一次只跑一个。
+# 不能和本人版的 9222 冲突；程序同一时间只保留一个 Edge（/切换 时换）。
 cdp_port        = 9223
 user_data_dir   = "browser_profile_parents"
 viewport_width  = 1600

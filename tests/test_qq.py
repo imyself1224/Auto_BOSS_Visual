@@ -232,6 +232,11 @@ def make_bot(tmp: str) -> QQBot:
     bot = QQBot(cfg, Path(__file__).resolve().parent.parent / "run.py")
     # /帮助 会读 docs/commands.png；测试用临时目录和 1x1 小图，别读真图
     bot.root = Path(tmp)
+    bot.active_path = Path(tmp) / ".qq_active_profile"
+    bot.active_profile = "self"
+    # 测试不碰真实 Edge：/切换 和 /投递 里的关/开浏览器都打桩
+    bot._close_browser = lambda cfg: True
+    bot._launch_browser = lambda cfg: (True, "")
     docs = Path(tmp) / "docs"
     docs.mkdir(exist_ok=True)
     (docs / "commands.png").write_bytes(TINY_PNG)
@@ -293,7 +298,8 @@ def test_bot_help_sends_text_and_image_once():
         text = message[0]["data"]["text"]
         help_lines = [ln.strip() for ln in text.splitlines()
                       if ln.strip().startswith("/")]
-        for cmd in ("/投递", "/演练", "/学历", "/薪资", "/关键词", "/配置", "/停止"):
+        for cmd in ("/切换", "/投递", "/演练", "/学历", "/薪资", "/关键词",
+                    "/配置", "/停止"):
             check(f"文本里 {cmd} 只有一条",
                   sum(1 for ln in help_lines if ln.startswith(cmd)), 1)
         for cmd in ("/状态", "/今日", "/统计", "/日志", "/重启", "/关机",
@@ -305,7 +311,7 @@ def test_bot_help_sends_text_and_image_once():
 
 
 def test_bot_start_parents_uses_config():
-    """「/切换 投递」必须把 --config 放在 greet 前面，子进程才会读爸妈版。"""
+    """切到爸妈版后，/投递 必须把 --config 放在 greet 前面。"""
     with tempfile.TemporaryDirectory() as tmp:
         bot = make_bot(tmp)
         parent_cfg = Path(tmp) / "config.parents.toml"
@@ -347,8 +353,12 @@ require_fit = false
 
         bot.popen = fake_popen
         bot._watch = lambda proc: None
-        reply = bot.start(live=True, limit=2, profile="parents")
+        closed = []
+        bot._close_browser = lambda cfg: closed.append(cfg.name) or True
+        bot.active_profile = "parents"       # 模拟已经 /切换 到爸妈版
+        reply = bot.start(live=True, limit=2)
         argv = captured["argv"]
+        check("启动前关掉另一个 Edge", closed, ["self"])
         check("回复标明爸妈版", "爸妈版" in reply, True)
         check("进程用爸妈版配置", "--config" in argv, True)
         check("配置路径正确",
@@ -360,23 +370,91 @@ require_fit = false
         check("实发走 --auto", "--auto" in argv, True)
         check("条数参数", argv[argv.index("--limit") + 1] if "--limit" in argv else None, "2")
         check("记录当前档位", bot.task_profile, "parents")
-        check("使用爸妈数据库", bot.task_cfg.db_path, Path(tmp) / "data" / "parents" / "autoboss.db")
+        check("使用爸妈数据库", bot.task_cfg.db_path,
+              Path(tmp) / "data" / "parents" / "autoboss.db")
 
         config_text = bot.parents_config_text()
         check_true("配置里能看到上海", "上海" in config_text)
         check_true("配置里能看到月薪 5000", "月薪最低 ≥5000" in config_text)
         check_true("配置里说明无简历", "无简历模式" in config_text)
-        check_true("状态能按爸妈版查", "爸妈版" in bot.handle("切换 状态"))
-        check_true("指令能查爸妈版配置", "月薪" in bot.handle("切换 配置"))
-        check_true("旧写法 /爸妈 仍兼容", "爸妈版" in bot.handle("爸妈 状态"))
+        check_true("状态能按爸妈版查", "爸妈版" in bot.handle("状态"))
+        check_true("指令能查爸妈版配置", "月薪" in bot.handle("配置"))
+
+        # 旧的 /爸妈 前缀已取消，只提示用 /切换
+        old = bot.handle("爸妈 状态")
+        check_true("旧 /爸妈 会提示改用 /切换", "/切换" in old and "已经改" in old)
+
+
+def test_bot_switch_profile():
+    with tempfile.TemporaryDirectory() as tmp:
+        bot = make_bot(tmp)
+        (Path(tmp) / "config.parents.toml").write_text(f"""
+[app]
+name = "parents"
+data_dir = "{Path(tmp).as_posix()}/data/parents"
+[browser]
+user_data_dir = "browser_profile_parents"
+cdp_port = 9223
+[resume]
+required = false
+[source]
+mode = "search"
+[search]
+queries = ["普工"]
+city = "101020100"
+[job_filter]
+require_internship = false
+exclude_internship = true
+min_daily_wage = 0
+min_monthly_wage = 5000
+require_city = "上海"
+require_fit = false
+""", encoding="utf-8")
+        closed, launched = [], []
+        bot._close_browser = lambda cfg: closed.append(cfg.name) or True
+        bot._launch_browser = lambda cfg: launched.append(cfg.name) or (True, "")
+
+        reply = bot.handle("切换")
+        check("切到爸妈版", bot.active_profile, "parents")
+        check("关掉旧的 Edge", closed, ["self"])
+        check("打开新的 Edge", launched, ["parents"])
+        check_true("回复说明爸妈版", "爸妈版" in reply)
+        check("当前档位已持久化", bot.active_path.read_text(encoding="utf-8").strip(),
+              "parents")
+        check_true("/配置 显示爸妈版", "爸妈版" in bot.handle("配置"))
+        check_true("/状态 显示爸妈版", "爸妈版" in bot.handle("状态"))
+
+        calls = []
+        bot.start = (lambda live, limit, keywords=None, prefs=None, profile=None:
+                     calls.append((live, limit, profile or bot.active_profile)) or "ok")
+        bot.handle("投递 3")
+        check("/投递 用当前档位", calls[-1], (True, 3, "parents"))
+
+        reply = bot.handle("切换")
+        check("切回本人版", bot.active_profile, "self")
+        check("关掉爸妈版 Edge", closed[-1], "parents")
+        check("打开本人版 Edge", launched[-1], "self")
+        check_true("回复说明本人版", "本人版" in reply)
+
+        check_true("带参数会拒绝", "不带参数" in bot.handle("切换 投递"))
+
+        class Running:
+            pid = 1
+
+            def poll(self):
+                return None
+
+        bot.proc = Running()
+        check_true("有任务时不能切换", "先发「/停止」" in bot.handle("切换"))
+        bot.proc = None
 
 
 def test_bot_command_parsing():
     with tempfile.TemporaryDirectory() as tmp:
         bot = make_bot(tmp)
         calls = []
-        bot.start = (lambda live, limit, keywords=None, prefs=None, profile="self":
-                     calls.append((live, limit, profile)) or "ok")
+        bot.start = (lambda live, limit, keywords=None, prefs=None, profile=None:
+                     calls.append((live, limit, profile or bot.active_profile)) or "ok")
         bot.handle("投递")
         bot.handle("投递 10")
         bot.handle("演练")
@@ -385,13 +463,12 @@ def test_bot_command_parsing():
               [(True, None, "self"), (True, 10, "self"),
                (False, 5, "self"), (False, 3, "self")])
 
-        # /投递 切换 3 与 /切换 投递 3 等价
-        bot.handle("投递 切换 3")
-        bot.handle("切换 投递 4")
-        check("爸妈版指令解析", calls[-2:],
-              [(True, 3, "parents"), (True, 4, "parents")])
-        bot.handle("爸妈 投递 5")       # 旧写法仍兼容
-        check("旧 /爸妈 写法也认", calls[-1], (True, 5, "parents"))
+        # /切换 只负责切档位，不接受「/切换 投递」这种旧前缀写法
+        before = len(calls)
+        check_true("旧前缀 /切换 投递 被拒绝",
+                   "不带参数" in bot.handle("切换 投递 4"))
+        check_true("/爸妈 前缀已取消", "已经改" in bot.handle("爸妈 投递 5"))
+        check("都没启动任务", len(calls), before)
 
         # 投递只接受条数：关键词 / 学历 / 薪资都走单独的指令
         for bad in ("投递 大模型算法 Agent", "投递 本科 300", "投递 abc",
@@ -412,7 +489,7 @@ def test_bot_education_and_salary_commands():
         bot = make_bot(tmp)
 
         reply = bot.handle("学历 硕士")
-        check_true("设定学历成功", "已设定学历：硕士" in reply)
+        check_true("设定学历成功", "已设定" in reply and "学历：硕士" in reply)
         check_true("回复里带 BOSS degree 参数", "degree=204" in reply)
         check("学历已保存", bot._prefs().education, "硕士")
         check_true("能查看设置", "硕士" in bot.handle("学历"))
@@ -426,7 +503,7 @@ def test_bot_education_and_salary_commands():
         check("设置没被改掉", bot._prefs().education, "硕士")
 
         reply = bot.handle("薪资 8k")
-        check_true("设定薪资成功", "已设定日薪" in reply)
+        check_true("设定薪资成功", "已设定" in reply and "日薪下限" in reply)
         check("月薪 8k 折成日薪", bot._prefs().min_wage, 367.8)
 
         reply = bot.handle("薪资 99999")
@@ -492,7 +569,7 @@ def test_bot_config_reset():
         check_true("关键词文件存在", bot.keywords_path.exists())
 
         reply = bot.handle("配置 清空")
-        check_true("提示已恢复最开始的状态", "已恢复最开始的状态" in reply)
+        check_true("提示已恢复最开始的状态", "最开始的状态" in reply)
         check("学历/薪资文件被删掉", bot.prefs_path.exists(), False)
         check("关键词文件被删掉", bot.keywords_path.exists(), False)
 
@@ -776,7 +853,7 @@ if __name__ == "__main__":
                test_bot_education_and_salary_commands,
                test_bot_config_command, test_bot_config_reset,
                test_bot_keywords_set_and_clear, test_bot_start_passes_keywords_to_greet,
-               test_bot_start_parents_uses_config,
+               test_bot_start_parents_uses_config, test_bot_switch_profile,
                test_bot_today_lists_sent_jobs, test_lock_is_exclusive_and_freed_on_kill,
                test_greet_refused_while_browser_busy, test_bot_sees_task_started_elsewhere,
                test_launcher_starts_whats_missing, test_launcher_skips_running_or_disabled,

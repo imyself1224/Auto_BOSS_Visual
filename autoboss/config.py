@@ -178,7 +178,7 @@ class Config:
 
         故意放在项目根目录、不随 data_dir 走：两个 Edge profile 虽然完全独立，
         但同时操作两个浏览器窗口会互相抢焦点、截图也会拍错窗口，
-        所以同一时间只允许一个任务操作浏览器。
+        所以同一时间只允许一个任务操作浏览器（/切换 也只保留一个 Edge）。
         """
         return PROJECT_ROOT / ".browser.lock"
 
