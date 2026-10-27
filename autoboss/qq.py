@@ -67,6 +67,19 @@ class OneBot:
         }, ensure_ascii=False))
         return echo
 
+    def send_group(self, group_id: int, message) -> str:
+        """发群聊；message 规则同 send_private（文本或消息段数组）。"""
+        echo = uuid.uuid4().hex[:8]
+        params = {"group_id": int(group_id), "message": message}
+        if isinstance(message, str):
+            params["auto_escape"] = True
+        self.ws.send(json.dumps({
+            "action": "send_group_msg",
+            "params": params,
+            "echo": echo,
+        }, ensure_ascii=False))
+        return echo
+
     def events(self, timeout: float | None = None):
         """逐个产出上报事件（带 post_type 的）。动作回执、心跳以外的东西都丢掉。
 

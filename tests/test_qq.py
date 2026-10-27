@@ -171,6 +171,27 @@ def test_onebot_sends_text_and_image_segments():
         fake.close()
 
 
+def test_onebot_sends_group_segments():
+    fake = FakeOneBot()
+    try:
+        message = [
+            {"type": "text", "data": {"text": "QQbot已启动，发送["}},
+            {"type": "at", "data": {"qq": "10002"}},
+            {"type": "text", "data": {"text": "/帮助]查看指令"}},
+        ]
+        with OneBot(f"ws://127.0.0.1:{fake.port}") as bot:
+            bot.send_group(1132464353, message)
+        wait_for(lambda: fake.received)
+        act = fake.received[0] if fake.received else {}
+        params = act.get("params", {})
+        check("动作是发群", act.get("action"), "send_group_msg")
+        check("发到群", params.get("group_id"), 1132464353)
+        check("message 原样是数组", params.get("message"), message)
+        check("数组消息不带 auto_escape", "auto_escape" in params, False)
+    finally:
+        fake.close()
+
+
 def test_agent_notifies_each_sent_job():
     silence()
 
@@ -213,9 +234,13 @@ def test_agent_stops_on_remote_flag():
 class FakeBotConn:
     def __init__(self):
         self.sent: list[tuple[int, object]] = []
+        self.groups: list[tuple[int, object]] = []
 
     def send_private(self, uid, message):
         self.sent.append((uid, message))
+
+    def send_group(self, group_id, message):
+        self.groups.append((group_id, message))
 
 
 TINY_PNG = base64.b64decode(
@@ -237,6 +262,9 @@ def make_bot(tmp: str) -> QQBot:
     bot.root = Path(tmp)
     bot.active_path = Path(tmp) / ".qq_active_profile"
     bot.active_profile = "self"
+    # 测试默认不启用群控；需要测群的用例自己填 group_id / bot_qq
+    bot.group_id = 0
+    bot.bot_qq = 0
     # 测试不碰真实 Edge：/切换 和 /投递 里的关/开浏览器都打桩
     bot._close_browser = lambda cfg: True
     bot._launch_browser = lambda cfg: (True, "")
@@ -450,6 +478,91 @@ require_fit = false
         bot.proc = Running()
         check_true("有任务时不能切换", "先发「/停止」" in bot.handle("切换"))
         bot.proc = None
+
+
+def test_bot_group_control():
+    with tempfile.TemporaryDirectory() as tmp:
+        bot = make_bot(tmp)
+        bot.group_id = 1132464353
+        bot.bot_qq = 10002
+        bot.bot = FakeBotConn()
+        base = {"post_type": "message", "message_type": "group",
+                "group_id": bot.group_id, "self_id": 10002, "user_id": 20002}
+
+        bot._on_event({**base, "raw_message": "/帮助"})
+        check("群里没 @ 机器人不理", bot.bot.groups, [])
+
+        bot._on_event({**base, "group_id": 111111,
+                       "raw_message": "[CQ:at,qq=10002] /帮助"})
+        check("别的群不理", bot.bot.groups, [])
+
+        bot._on_event({**base, "user_id": 10002,
+                       "raw_message": "[CQ:at,qq=10002] /帮助"})
+        check("机器人自己发的不理", bot.bot.groups, [])
+
+        # 任意群成员：先 @机器人，再发 /指令
+        bot._on_event({**base, "user_id": 99999,
+                       "raw_message": "[CQ:at,qq=10002] /帮助"})
+        check("群里 @机器人 后回复到群", len(bot.bot.groups), 1)
+        gid, msg = bot.bot.groups[0]
+        check("回的是这个群", gid, 1132464353)
+        check_true("群帮助是文本+图片", isinstance(msg, list) and len(msg) == 2)
+        check_true("群帮助文本有指令", "投递指令" in msg[0]["data"]["text"])
+        check_true("群帮助图片段", msg[1]["type"] == "image")
+        check("群指令不私聊", bot.bot.sent, [])
+
+        bot._on_event({**base, "user_id": 88888,
+                       "raw_message": "[CQ:at,qq=10002] /状态"})
+        check("第二个群成员也能用", len(bot.bot.groups), 2)
+        check_true("群状态回复", "空闲" in bot.bot.groups[1][1])
+
+        # 兼容 OneBot 消息段数组（raw_message 里没有 @）
+        bot._on_event({**base, "user_id": 77777, "raw_message": "",
+                       "message": [
+                           {"type": "at", "data": {"qq": "10002"}},
+                           {"type": "text", "data": {"text": "/状态"}}]})
+        check("消息段数组也能识别 @", len(bot.bot.groups), 3)
+
+
+def test_bot_group_switch_announcement():
+    with tempfile.TemporaryDirectory() as tmp:
+        bot = make_bot(tmp)
+        (Path(tmp) / "config.parents.toml").write_text(f"""
+[app]
+name = "parents"
+data_dir = "{Path(tmp).as_posix()}/data/parents"
+[browser]
+user_data_dir = "browser_profile_parents"
+cdp_port = 9223
+[resume]
+required = false
+[source]
+mode = "search"
+[search]
+queries = ["普工"]
+city = "101020100"
+[job_filter]
+require_internship = false
+exclude_internship = true
+min_daily_wage = 0
+min_monthly_wage = 5000
+require_city = "上海"
+require_fit = false
+""", encoding="utf-8")
+        bot.group_id = 1132464353
+        bot.bot_qq = 10002
+        bot.bot = FakeBotConn()
+        bot._close_browser = lambda cfg: True
+        bot._launch_browser = lambda cfg: (True, "")
+        bot.handle("切换")
+        check("切换后发群公告", len(bot.bot.groups), 1)
+        gid, segments = bot.bot.groups[0]
+        check("公告发到群里", gid, 1132464353)
+        check_true("公告是 at + 文本", isinstance(segments, list) and len(segments) == 3)
+        check("公告 at 机器人", segments[1]["data"]["qq"], "10002")
+        text = segments[0]["data"]["text"] + segments[2]["data"]["text"]
+        check_true("公告说 QQbot 已启动", "QQbot已启动" in text)
+        check_true("公告教 @机器人 发 /帮助", "/帮助" in text)
 
 
 def test_bot_command_parsing():
@@ -853,6 +966,7 @@ if __name__ == "__main__":
                test_notifier_flushes_outbox_when_back_online,
                test_notifier_queues_when_onebot_reports_failure,
                test_onebot_sends_text_and_image_segments,
+               test_onebot_sends_group_segments,
                test_agent_notifies_each_sent_job, test_agent_stops_on_remote_flag,
                test_bot_only_obeys_owner_private_chat, test_bot_command_parsing,
                test_bot_help_sends_text_and_image_once,
@@ -860,6 +974,7 @@ if __name__ == "__main__":
                test_bot_config_command, test_bot_config_reset,
                test_bot_keywords_set_and_clear, test_bot_start_passes_keywords_to_greet,
                test_bot_start_parents_uses_config, test_bot_switch_profile,
+               test_bot_group_control, test_bot_group_switch_announcement,
                test_bot_today_lists_sent_jobs, test_lock_is_exclusive_and_freed_on_kill,
                test_greet_refused_while_browser_busy, test_bot_sees_task_started_elsewhere,
                test_launcher_starts_whats_missing, test_launcher_skips_running_or_disabled,

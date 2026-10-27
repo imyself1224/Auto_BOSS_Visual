@@ -453,10 +453,22 @@ schtasks /Create /TN auto_boss_parents /SC DAILY /ST 10:05 /TR "C:\path\to\Auto_
    ```ini
    ONEBOT_TOKEN=上面的token
    OWNER_QQ=你的大号QQ号
+   # 可选：要开放群控的群号；群里所有人 @机器人 + /指令 都能控制
+   QQ_GROUP_ID=群号
    ```
    `config.toml` 的 `[qq]` 里确认 `enabled = true`、`ws_url = "ws://127.0.0.1:3001"`，
-   QQ 安装路径不同的改 `qq_path`。
+   QQ 安装路径不同的改 `qq_path`。群号只放 `.env`，不要提交到仓库。
 6. 再运行 `python run.py bot`，大号会收到「已上线」。
+
+**群控（可选）：** 配好 `QQ_GROUP_ID` 后，群里**任意成员**都必须先 `@机器人`，
+再发 `/指令`，bot 才会执行并把回复发回群里；不 @ 的群消息一律不理。
+私聊仍然只认 `OWNER_QQ`。每次 `/切换` 成功后，bot 会在群里发：
+
+```text
+QQbot已启动，发送[@菜菜/帮助]查看指令
+```
+
+（`@菜菜` 是机器人的 QQ 昵称，实际显示以机器人为准。）
 
 `run.py bot` 启动时会自动拉起 SnowLuma 和 QQ（`[qq].auto_launch`），两者都不建窗口。
 想开机自启又不想任务栏里挂黑窗口，在「启动」文件夹（Win+R → `shell:startup`）里放一个
@@ -474,7 +486,7 @@ bot 和 SnowLuma 的输出分别落在 `logs/bot_*.log` 和 `SnowLuma/logs/`。
 bot 出现未预期异常时会自动把最近日志推给大号；**断网时发不出去的通知会存进
 `logs/qq_outbox/`，恢复连接后自动补发**。
 
-**指令表（大号私聊小号，以 `/` 开头）：**
+**指令表（大号私聊，或群里先 @机器人 再发；以 `/` 开头）：**
 
 ![auto_boss QQ 指令表](docs/commands.png)
 

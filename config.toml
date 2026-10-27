@@ -249,6 +249,9 @@ access_token_env = "ONEBOT_TOKEN"
 # QQ 号属于个人信息，放 .env（OWNER_QQ=123456），这里保持 0；直接写在这里也行，但别提交。
 owner_qq    = 0
 owner_qq_env = "OWNER_QQ"
+# 群控：该群里所有人 @机器人 + /指令 都能控制；群号也放 .env（QQ_GROUP_ID），不写在这里。
+group_id     = 0
+group_id_env = "QQ_GROUP_ID"
 # 每投出一条就推一条。false = 只推停机/出错这种需要你知道的事
 notify_each = true
 # run.py bot 启动时自动拉起 SnowLuma 和 QQ（已经在跑的不会重复开）。

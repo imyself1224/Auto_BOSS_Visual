@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -84,6 +85,14 @@ class QQBot:
         self.active_profile = self._load_active_profile()
         self.notifier = Notifier(cfg)
         self.owner = self.notifier.owner
+        # 群控：该群所有人 @机器人 + /指令 都生效；群号也从 .env 读，避免提交到仓库
+        group = cfg.get("qq.group_id", 0) or 0
+        group_env = str(cfg.get("qq.group_id_env", "") or "")
+        if not group and group_env:
+            group = cfg.env(group_env)
+        self.group_id = int(str(group).strip() or 0)
+        # OneBot 上报事件里的 self_id；群里要按它判断 @ 的是不是机器人自己
+        self.bot_qq = 0
         self.bot: OneBot | None = None
         self.lock = BrowserLock(cfg.lock_path)
         # 「/关键词 ...」设下来、下次任务沿用的关键词（一行一个）
@@ -257,6 +266,7 @@ class QQBot:
                          "下次 /投递 会自动再试。")
         lines.append("现在 /投递、/演练、/配置、/状态 等都对"
                      f"「{new_label}」生效；同一时间只保留一个 Edge。")
+        self.announce_group_started()
         return "\n".join(lines)
 
     @staticmethod
@@ -271,7 +281,9 @@ class QQBot:
             return 1
 
         QQLauncher(self.cfg).ensure()
-        print(f"连接 OneBot：{self.notifier.ws_url}，只接受 QQ {self.owner} 的私聊指令")
+        group_note = (f"；群 {self.group_id} 所有人 @机器人 + /指令" if self.group_id
+                      else "；未配置群控")
+        print(f"连接 OneBot：{self.notifier.ws_url}，私聊接受 QQ {self.owner}{group_note}")
         backoff = 3.0
         first = True
         failures = 0
@@ -350,15 +362,25 @@ class QQBot:
         except OSError:
             return ""
 
-    def reply(self, text: str):
+    def reply(self, text: str, group_id: int = 0):
         if self.bot is not None:
-            self.bot.send_private(self.owner, text)
+            self._send(text, group_id)
 
-    def reply_help(self):
+    def _send(self, message, group_id: int = 0):
+        """group_id 非 0 发群，否则发大号私聊。"""
+        if self.bot is None:
+            return
+        if group_id:
+            self.bot.send_group(group_id, message)
+        else:
+            self.bot.send_private(self.owner, message)
+
+    def reply_help(self, group_id: int = 0):
         """`/帮助`：文本 + docs/commands.png **同一条消息**发出去。
 
         文本只列投递相关指令，完整指令表在图片里；图片用 OneBot 的
         `base64://` 图片段，SnowLuma / NapCat 都能直接上传。
+        群里 @ 机器人发 /帮助 时，回复发回同一个群。
         """
         if self.bot is None:
             return
@@ -372,37 +394,87 @@ class QQBot:
             except OSError as exc:
                 print(f"  [qq] 帮助图片读取失败：{exc}")
         if len(segments) == 1:
-            self.bot.send_private(self.owner, HELP)
+            self._send(HELP, group_id)
             return
         try:
-            self.bot.send_private(self.owner, segments)
+            self._send(segments, group_id)
         except Exception as exc:  # noqa: BLE001 —— 图片发不出去时退回纯文本
             print(f"  [qq] 帮助图片发送失败，退回纯文本："
                   f"{type(exc).__name__}: {exc}")
-            self.bot.send_private(self.owner, HELP)
+            self._send(HELP, group_id)
+
+    def announce_group_started(self):
+        """切换成功后，在群里发「QQbot已启动，发送[@菜菜/帮助]查看指令」。"""
+        if self.bot is None or not self.group_id or not self.bot_qq:
+            return
+        segments = [
+            {"type": "text", "data": {"text": "QQbot已启动，发送["}},
+            {"type": "at", "data": {"qq": str(self.bot_qq)}},
+            {"type": "text", "data": {"text": "/帮助]查看指令"}},
+        ]
+        try:
+            self.bot.send_group(self.group_id, segments)
+        except Exception as exc:  # noqa: BLE001 —— 群公告失败不影响切换
+            print(f"  [qq] 群启动公告发送失败：{type(exc).__name__}: {exc}")
+
+    def _group_command_text(self, event: dict) -> str | None:
+        """从群消息里取出「@机器人 + /指令」的指令；没 @ 机器人就返回 None。"""
+        self_id = int(event.get("self_id") or self.bot_qq or 0)
+        if not self_id or int(event.get("user_id") or 0) == self_id:
+            return None
+        raw = cq_unescape(str(event.get("raw_message") or ""))
+        at_ids = [int(x) for x in re.findall(r"\[CQ:at,qq=(\d+)\]", raw)]
+        text = re.sub(r"\[CQ:[^\]]+\]", "", raw).strip()
+        message = event.get("message")
+        if isinstance(message, list):
+            if not at_ids:
+                at_ids = [int(seg.get("data", {}).get("qq") or 0)
+                          for seg in message
+                          if isinstance(seg, dict) and seg.get("type") == "at"]
+            if not text:
+                text = "".join(
+                    str(seg.get("data", {}).get("text") or "")
+                    for seg in message
+                    if isinstance(seg, dict) and seg.get("type") == "text").strip()
+        if self_id not in at_ids:
+            return None
+        if not text.startswith(("/", "／")):
+            return None
+        return text[1:].strip() or None
 
     # ------------------------------------------------------------------
     def _on_event(self, event: dict):
-        if (event.get("post_type") != "message"
-                or event.get("message_type") != "private"
-                or int(event.get("user_id") or 0) != self.owner):
+        if event.get("post_type") != "message":
             return
-        text = cq_unescape(str(event.get("raw_message") or "")).strip()
-        # 只有 / 开头的才算指令，大号跟小号平常聊天不会被当成指令
-        if not text.startswith(("/", "／")):
+        self.bot_qq = int(event.get("self_id") or self.bot_qq or 0)
+        group_id = 0
+        if event.get("message_type") == "private":
+            if int(event.get("user_id") or 0) != self.owner:
+                return
+            text = cq_unescape(str(event.get("raw_message") or "")).strip()
+            # 只有 / 开头的才算指令，大号跟小号平常聊天不会被当成指令
+            if not text.startswith(("/", "／")):
+                return
+            text = text[1:].strip()
+        elif event.get("message_type") == "group":
+            group_id = int(event.get("group_id") or 0)
+            if not self.group_id or group_id != self.group_id:
+                return
+            text = self._group_command_text(event)
+        else:
             return
-        text = text[1:].strip()
         if not text:
             return
-        print(f"[{datetime.now():%H:%M:%S}] 收到指令：{text}")
+        where = f"群 {group_id} " if group_id else ""
+        print(f"[{datetime.now():%H:%M:%S}] 收到{where}指令：{text}")
         try:
             reply = self.handle(text)
             if reply == HELP:
-                self.reply_help()       # 文本 + 指令表图片，一条消息
+                self.reply_help(group_id)       # 文本 + 指令表图片，一条消息
             else:
-                self.reply(reply)
+                self.reply(reply, group_id)
         except Exception as exc:  # noqa: BLE001 —— 一条指令出错不能把 bot 带崩
-            self.reply(f"❌ 执行出错：{type(exc).__name__}: {exc}")
+            self.reply(f"❌ 执行出错：{type(exc).__name__}: {exc}", group_id)
 
     def handle(self, text: str) -> str:
         """解析一条指令，返回要回复的文字。"""
